@@ -328,7 +328,7 @@ class TestPlugin(BasePlugin):
             dialogId = DialogObject.getPeerDialogId(peer)
             messageId = messageObject.messageOwner.id
             if open:
-                    # log("[TRANSCRIBER] open is True")
+                # log("[TRANSCRIBER] open is True")
                 if messageObject.messageOwner.voiceTranscription != None and messageObject.messageOwner.voiceTranscriptionFinal:
                     # log("[TRANSCRIBER] The message already has transcription")
                     TranscribeButton.openVideoTranscription(messageObject)
@@ -337,7 +337,7 @@ class TestPlugin(BasePlugin):
                     run_on_ui_thread(lambda: NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.voiceTranscriptionUpdate, messageObject, None, None, True, True))
                 else:
                     # log("[TRANSCRIBER] Message doesn't have transcription")
-                    id = messageId. # Not ideal, but good enough
+                    id = messageId  # Not ideal, but good enough
 
                     if transcribeOperationsByDialogPosition == None:
                         set_private_field(this, "transcribeOperationsByDialogPosition", HashMap())
@@ -361,7 +361,7 @@ class TestPlugin(BasePlugin):
                 messageObject.messageOwner.voiceTranscriptionOpen = False
                 MessagesStorage.getInstance(account).updateMessageVoiceTranscriptionOpen(dialogId, messageId, messageObject.messageOwner)
                 run_on_ui_thread(lambda: NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.voiceTranscriptionUpdate, messageObject, None, None, False, None))
-            # Identical to TranscribeButton.java
+                # Identical to TranscribeButton.java
 
         def reqInfoHash(self, messageObject):
             if messageObject == None:
@@ -380,7 +380,7 @@ class TestPlugin(BasePlugin):
                 log("[TRANSCRIBER] " + str(path))
                 self.stop_animations(this, messageObject, account, dialogId, messageId)
                 return
-            # log("[TRANSCRIBER] Got path")
+                # log("[TRANSCRIBER] Got path")
 
             if self.plugin.get_setting("convert_to_audio", True) == True and messageObject.type == 5:  # TYPE_ROUND_VIDEO
                 path = self.extract_audio_from_mp4(path)
@@ -389,7 +389,7 @@ class TestPlugin(BasePlugin):
                     log("[TRANSCRIBER] " + str(path))
                     self.stop_animations(this, messageObject, account, dialogId, messageId)
                     return
-            # log("[TRANSCRIBER] Converted to audio")
+                    # log("[TRANSCRIBER] Converted to audio")
 
             text = self.send_transcription_request(path)
             if isinstance(text, Exception):
@@ -397,7 +397,7 @@ class TestPlugin(BasePlugin):
                 log("[TRANSCRIBER] " + str(path))
                 self.stop_animations(this, messageObject, account, dialogId, messageId)
                 return
-            # log("[TRANSCRIBER] Got text")
+                # log("[TRANSCRIBER] Got text")
 
             finalText = text
             finalId = id
