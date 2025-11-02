@@ -40,10 +40,11 @@ class LocalizationManager:  # Credits for the logic: Command List plugin by @mih
             "pricing_assemblyai": "Free up to 185 hours total, then $0.15/hour.\n\nhttps://www.assemblyai.com/pricing",
             "pricing_deepgram": "Free up to ~300 hours total, then $4.8/hour.\n\nhttps://deepgram.com/pricing",
             "pricing_mistral": "Free. Has a rate limit of 1 request per second.\n\nhttps://mistral.ai/pricing",
+            "pricing_gemini": "Free tier available, then pay-as-you-go.\n\nhttps://ai.google.dev/pricing",
             "other_open_channel": "Open channel",
             "alert_close": "Close",
             "alert_open": "Open",
-            "alert_provider_choice": "𝗔𝘀𝘀𝗲𝗺𝗯𝗹𝘆𝗔𝗜:\n  • Speed: low (~8 seconds on average)\n  • Quality: best\n\n𝗗𝗲𝗲𝗽𝗴𝗿𝗮𝗺:\n  • Speed: high (~3 seconds on average)\n  • Quality: average (sometimes incorrect punctuation)\n\n𝗠𝗶𝘀𝘁𝗿𝗮𝗹:\n  • Speed: high (~3 seconds on average)\n  • Quality: average (may hallucinate)\n\nP.S. These are the results of my tests, yours may vary.",
+            "alert_provider_choice": "𝗔𝘀𝘀𝗲𝗺𝗯𝗹𝘆𝗔𝗜:\n  • Speed: low (~8 seconds on average)\n  • Quality: best\n\n𝗗𝗲𝗲𝗽𝗴𝗿𝗮𝗺:\n  • Speed: high (~3 seconds on average)\n  • Quality: average (sometimes incorrect punctuation)\n\n𝗠𝗶𝘀𝘁𝗿𝗮𝗹:\n  • Speed: high (~3 seconds on average)\n  • Quality: average (may hallucinate)\n\n𝗚𝗲𝗺𝗶𝗻𝗶:\n  • Speed: high (~3-5 seconds on average)\n  • Quality: best (accurate and contextual)\n\nP.S. These are the results of my tests, yours may vary.",
             "alert_provider_choice_title": "Provider choice",
             "alert_usage_title": "Usage",
             "alert_usage": "To transcribe an audio/video message, just tap the transcribe button next to it. No commands needed.",
@@ -71,10 +72,11 @@ class LocalizationManager:  # Credits for the logic: Command List plugin by @mih
             "pricing_assemblyai": "Бесплатно первые 185 часов аудио, затем 0,15$/час.\n\nhttps://www.assemblyai.com/pricing",
             "pricing_deepgram": "Бесплатно первые ~300 часов аудио, затем 4,8$/час.\n\nhttps://deepgram.com/pricing",
             "pricing_mistral": "Бесплатно. Максимум 1 запрос в секунду.\n\nhttps://mistral.ai/pricing",
+            "pricing_gemini": "Бесплатная тіера доступна, затем рассчитание по тарифу.\n\nhttps://ai.google.dev/pricing",
             "other_open_channel": "Открыть канал",
             "alert_close": "Закрыть",
             "alert_open": "Открыть",
-            "alert_provider_choice": "𝗔𝘀𝘀𝗲𝗺𝗯𝗹𝘆𝗔𝗜:\n  • Скорость: низкая (~8 секунд в среднем)\n  • Качество: лучшее\n\n𝗗𝗲𝗲𝗽𝗴𝗿𝗮𝗺:\n  • Скорость: высокая (~3 секунды в среднем)\n  • Качество: среднее (иногда некорректная пунктуация)\n\n𝗠𝗶𝘀𝘁𝗿𝗮𝗹:\n  • Скорость: высокая (~3 секунды в среднем)\n  • Качество: среднее (может галлюцинировать)\n\nP.S. Это результаты моих тестов, ваши могут отличаться.",
+            "alert_provider_choice": "𝗔𝘀𝘀𝗲𝗺𝗯𝗹𝘆𝗔𝗜:\n  • Скорость: низкая (~8 секунд в среднем)\n  • Качество: лучшее\n\n𝗗𝗲𝗲𝗽𝗴𝗿𝗮𝗺:\n  • Скорость: высокая (~3 секунды в среднем)\n  • Качество: среднее (иногда некорректная пунктуация)\n\n𝗠𝗶𝘀𝘁𝗿𝗮𝗹:\n  • Скорость: высокая (~3 секунды в среднем)\n  • Качество: среднее (может галлюцинировать)\n\n𝗚𝗲𝗺𝗶𝗻𝗶:\n  • Скорость: высокая (~3-5 секунды в среднем)\n  • Качество: лучшее (точное и контекстное)",
             "alert_provider_choice_title": "Выбор провайдера",
             "alert_usage_title": "Использование",
             "alert_usage": "Чтобы расшифровать аудио/видеосообщение, просто нажмите на кнопку расшифровки рядом с ним. Никаких команд.",
@@ -121,9 +123,12 @@ class TestPlugin(BasePlugin):
             elif provider == 1:
                 text = localization.get_string("pricing_deepgram")
                 title = "Deepgram"
-            else:
+            elif provider == 2:
                 text = localization.get_string("pricing_mistral")
                 title = "Mistral"
+            else:
+                text = localization.get_string("pricing_gemini")
+                title = "Gemini"
             current_fragment = get_last_fragment()
             if not current_fragment or not current_fragment.getParentActivity():
                 return
@@ -176,8 +181,10 @@ class TestPlugin(BasePlugin):
             uri = "https://www.assemblyai.com/pricing"
         elif provider == 1:
             uri = "https://deepgram.com/pricing"
-        else:
+        elif provider == 2:
             uri = "https://mistral.ai/pricing"
+        else:
+            uri = "https://ai.google.dev/pricing"
         intent = Intent(Intent.ACTION_VIEW, Uri.parse(uri))
         context.startActivity(intent)
 
@@ -192,8 +199,10 @@ class TestPlugin(BasePlugin):
             uri = "https://www.assemblyai.com/dashboard/api-keys"
         elif provider == 1:
             uri = "https://console.deepgram.com"
-        else:
+        elif provider == 2:
             uri = "https://admin.mistral.ai/organization/api-keys"
+        else:
+            uri = "https://ai.google.dev/aistudio"
         intent = Intent(Intent.ACTION_VIEW, Uri.parse(uri))
         context.startActivity(intent)
 
@@ -209,14 +218,16 @@ class TestPlugin(BasePlugin):
         provider = self.get_setting("provider", 0)
         settings = [
             Header(text=localization.get_string("header_settings")),
-            Selector(key="provider", text=localization.get_string("settings_provider"), default=4, items=["AssemblyAI", "Deepgram", "Mistral"], icon="menu_feature_voice"),
+            Selector(key="provider", text=localization.get_string("settings_provider"), default=0, items=["AssemblyAI", "Deepgram", "Mistral", "Gemini"], icon="menu_feature_voice"),
         ]
         if provider == 0:
             settings.append(Input(key="token_assemblyai", text=localization.get_string("settings_token"), icon="menu_privacy" if len(self.get_setting("token_assemblyai", "")) > 0 else "menu_unlock"))
         elif provider == 1:
             settings.append(Input(key="token_deepgram", text=localization.get_string("settings_token"), icon="menu_privacy" if len(self.get_setting("token_deepgram", "")) > 0 else "menu_unlock"))
-        else:
+        elif provider == 2:
             settings.append(Input(key="token_mistral", text=localization.get_string("settings_token"), icon="menu_privacy" if len(self.get_setting("token_mistral", "")) > 0 else "menu_unlock"))
+        else:
+            settings.append(Input(key="token_gemini", text=localization.get_string("settings_token"), icon="menu_privacy" if len(self.get_setting("token_gemini", "")) > 0 else "menu_unlock"))
         settings.append(Switch(key="convert_to_audio", text=localization.get_string("settings_convert_to_audio"), default=True, subtext=localization.get_string("settings_convert_to_audio_subtext"), icon="msg_speed"))
         if provider == 2:
             settings.extend([
@@ -245,7 +256,6 @@ class TestPlugin(BasePlugin):
         # The logic is mostly identical to TranscribeButton.java but with minor changes
         def onTap(self, param):
             # log("[TRANSCRIBER] onTap() called")
-
             this = param.thisObject
 
             parent = get_private_field(this, "parent")
@@ -282,8 +292,8 @@ class TestPlugin(BasePlugin):
                     set_private_field(this, "clickedToOpen", True)
 
                 self.transcribePressed(param, parent.getMessageObject(), toOpen)
-
-        # The logic is mostly identical to TranscribeButton.java but with minor changes
+                
+            # The logic is mostly identical to TranscribeButton.java but with minor changes
         def transcribePressed(self, param, messageObject, open):
             # log("[TRANSCRIBER] transcribePressed() called")
             provider = self.plugin.get_setting("provider", 0)
@@ -291,8 +301,10 @@ class TestPlugin(BasePlugin):
                 token = self.plugin.get_setting("token_assemblyai", "")
             elif provider == 1:
                 token = self.plugin.get_setting("token_deepgram", "")
-            else:
+            elif provider == 2:
                 token = self.plugin.get_setting("token_mistral", "")
+            else:
+                token = self.plugin.get_setting("token_gemini", "")
 
             if token == "":
                 run_on_ui_thread(lambda: BulletinHelper.show_error(localization.get_string("error_no_token")))
@@ -316,7 +328,7 @@ class TestPlugin(BasePlugin):
             dialogId = DialogObject.getPeerDialogId(peer)
             messageId = messageObject.messageOwner.id
             if open:
-                # log("[TRANSCRIBER] open is True")
+                    # log("[TRANSCRIBER] open is True")
                 if messageObject.messageOwner.voiceTranscription != None and messageObject.messageOwner.voiceTranscriptionFinal:
                     # log("[TRANSCRIBER] The message already has transcription")
                     TranscribeButton.openVideoTranscription(messageObject)
@@ -325,7 +337,7 @@ class TestPlugin(BasePlugin):
                     run_on_ui_thread(lambda: NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.voiceTranscriptionUpdate, messageObject, None, None, True, True))
                 else:
                     # log("[TRANSCRIBER] Message doesn't have transcription")
-                    id = messageId  # Not ideal, but good enough
+                    id = messageId. # Not ideal, but good enough
 
                     if transcribeOperationsByDialogPosition == None:
                         set_private_field(this, "transcribeOperationsByDialogPosition", HashMap())
@@ -338,7 +350,7 @@ class TestPlugin(BasePlugin):
                     transcribeOperationsById.put(id, messageObject)
 
                     messageObject.messageOwner.voiceTranscriptionId = id
-
+                    
                     # Fixes loading animation not playing when reopening the chat
                     MessagesStorage.getInstance(account).updateMessageVoiceTranscription(dialogId, messageId, "", messageObject.messageOwner)
 
@@ -349,8 +361,8 @@ class TestPlugin(BasePlugin):
                 messageObject.messageOwner.voiceTranscriptionOpen = False
                 MessagesStorage.getInstance(account).updateMessageVoiceTranscriptionOpen(dialogId, messageId, messageObject.messageOwner)
                 run_on_ui_thread(lambda: NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.voiceTranscriptionUpdate, messageObject, None, None, False, None))
+            # Identical to TranscribeButton.java
 
-        # Identical to TranscribeButton.java
         def reqInfoHash(self, messageObject):
             if messageObject == None:
                 return 0
@@ -361,7 +373,7 @@ class TestPlugin(BasePlugin):
             TranscribeButton = find_class("org.telegram.ui.Components.TranscribeButton")
             MessagesStorage = find_class("org.telegram.messenger.MessagesStorage")
             transcribeOperationsByDialogPosition = get_private_field(this, "transcribeOperationsByDialogPosition")
-
+            
             path = self.get_audio_path(messageObject)
             if isinstance(path, Exception):
                 run_on_ui_thread(lambda: BulletinHelper.show_error(f"{localization.get_string('error_get_audio_path')}: {path}"))
@@ -377,7 +389,7 @@ class TestPlugin(BasePlugin):
                     log("[TRANSCRIBER] " + str(path))
                     self.stop_animations(this, messageObject, account, dialogId, messageId)
                     return
-                # log("[TRANSCRIBER] Converted to audio")
+            # log("[TRANSCRIBER] Converted to audio")
 
             text = self.send_transcription_request(path)
             if isinstance(text, Exception):
@@ -393,6 +405,7 @@ class TestPlugin(BasePlugin):
             messageObject.messageOwner.voiceTranscriptionOpen = True
             messageObject.messageOwner.voiceTranscriptionFinal = True
             MessagesStorage.getInstance(account).updateMessageVoiceTranscription(dialogId, messageId, finalText, messageObject.messageOwner)
+            transcribeOperationsByDialogPosition = get_private_field(this, "transcribeOperationsByDialogPosition")
             transcribeOperationsByDialogPosition.remove(self.reqInfoHash(messageObject))
             run_on_ui_thread(lambda: this.finishTranscription(messageObject, finalId, finalText))
             this.showOffTranscribe(messageObject)
@@ -470,7 +483,7 @@ class TestPlugin(BasePlugin):
 
                 muxer.start()
 
-                buffer = ByteBuffer.allocate(1024 * 1024)  # 1MB buffer
+                buffer = ByteBuffer.allocate(1024 * 1024). # 1MB buffer
 
                 while True:
                     sample_size = extractor.readSampleData(buffer, 0)
@@ -503,8 +516,10 @@ class TestPlugin(BasePlugin):
                 token = self.plugin.get_setting("token_assemblyai", "")
             elif provider == 1:
                 token = self.plugin.get_setting("token_deepgram", "")
-            else:
+            elif provider == 2:
                 token = self.plugin.get_setting("token_mistral", "")
+            else:
+                token = self.plugin.get_setting("token_gemini", "")
             try:
                 if provider == 0:  # AssemblyAI
                     base_url = "https://api.assemblyai.com"
@@ -551,7 +566,7 @@ class TestPlugin(BasePlugin):
                     result = response.json()["results"]["channels"][0]["alternatives"][0]["transcript"]
                     return str(result)
 
-                else:  # Mistral
+                elif provider == 2:
                     url = "https://api.mistral.ai/v1/audio/transcriptions"
                     headers = {"x-api-key": token}
                     files = {
@@ -565,6 +580,88 @@ class TestPlugin(BasePlugin):
 
                     transcription = response.json()["text"]
                     return str(transcription)
+
+                else:  # Gemini
+                    import os
+                    file_size = os.path.getsize(path)
+                    file_name = os.path.basename(path)
+                    mime_type = 'video/mp4' if path.lower().endswith('.mp4') else 'audio/ogg'
+
+                    headers_start = {
+                        "X-Goog-Upload-Protocol": "resumable",
+                        "X-Goog-Upload-Command": "start",
+                        "X-Goog-Upload-Header-Content-Length": str(file_size),
+                        "X-Goog-Upload-Header-Content-Type": mime_type,
+                        "Content-Type": "application/json"
+                    }
+                    json_data_start = {"file": {"display_name": file_name}}
+                    start_upload_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={token}"
+                    response_start = requests.post(start_upload_url, headers=headers_start, json=json_data_start, timeout=10)
+                    if response_start.status_code != 200:
+                        raise RuntimeError(f"Gemini upload start failed: {response_start.text}")
+
+                    upload_url = response_start.headers.get("X-Goog-Upload-Url")
+
+                    headers_upload = {
+                        "X-Goog-Upload-Offset": "0",
+                        "X-Goog-Upload-Command": "upload, finalize",
+                        "Content-Type": mime_type
+                    }
+                    with open(path, "rb") as f:
+                        file_data = f.read()
+                    response_upload = requests.post(upload_url, headers=headers_upload, data=file_data, timeout=60)
+                    if response_upload.status_code != 200:
+                        raise RuntimeError(f"Gemini file upload failed: {response_upload.text}")
+
+                    upload_result_json = response_upload.json()
+                    uploaded_file_name = upload_result_json.get("file", {}).get("name")
+
+                    file_api_url = f"https://generativelanguage.googleapis.com/v1beta/{uploaded_file_name}?key={token}"
+                    for _ in range(15):
+                        response_get = requests.get(file_api_url, timeout=10)
+                        if response_get.status_code != 200:
+                            raise RuntimeError(f"File status check error: {response_get.status_code}")
+                        file_state = response_get.json().get("state")
+                        if file_state == "ACTIVE":
+                            break
+                        if file_state == "FAILED":
+                            raise RuntimeError(f"File processing failed on server: {response_get.json()}")
+                        time.sleep(1)
+                    else:
+                        raise RuntimeError("File did not become ACTIVE in time.")
+
+                    file_uri = upload_result_json.get("file", {}).get("uri")
+                    generate_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key={token}"
+                    safety_settings = [
+                        {"category": c, "threshold": "BLOCK_NONE"}
+                        for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]
+                    ]
+                    prompt = """Your task is to create an accurate transcript of the audio recording. Follow these rules strictly:
+
+1. **VERBATIM:** Transcribe the speech word for word exactly as spoken.
+2. **PRESERVE IMPERFECTIONS:** Keep all filler words (like: um, uh, you know, like), hesitations (uh, um, er), word repetitions, and any self-corrections by the speaker.
+3. **NO EDITING:** Do not correct any grammatical, stylistic, or speech errors.
+4. **NO ADDITIONS:** Do not add any words, comments, explanations, or descriptions of background sounds (e.g., [laughter], [noise]).
+5. **NO FORMATTING:** The entire text should be plain text without paragraphs, headings, lists, or any formatting (bold, italics).
+
+The final result should be a raw, unprocessed textual copy of the spoken words."""
+                    json_data_generate = {
+                        "contents": [
+                            {
+                                "parts": [
+                                    {"text": prompt},
+                                    {"fileData": {"mimeType": mime_type, "fileUri": file_uri}}
+                                ]
+                            }
+                        ],
+                        "safetySettings": safety_settings
+                    }
+                    response_generate = requests.post(generate_url, json=json_data_generate, timeout=30)
+                    try:
+                        return response_generate.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    except (KeyError, IndexError):
+                        raise RuntimeError(f"Unexpected Gemini response: {response_generate.json()}")
+
             except Exception as e:
                 return e
 
