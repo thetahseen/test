@@ -483,7 +483,7 @@ class TestPlugin(BasePlugin):
 
                 muxer.start()
 
-                buffer = ByteBuffer.allocate(1024 * 1024). # 1MB buffer
+                buffer = ByteBuffer.allocate(1024 * 1024)  # 1MB buffer
 
                 while True:
                     sample_size = extractor.readSampleData(buffer, 0)
