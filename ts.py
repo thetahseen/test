@@ -253,7 +253,9 @@ class TestPlugin(BasePlugin):
         def replace_hooked_method(self, param):
             self.onTap(param)
 
+        # The logic is mostly identical to TranscribeButton.java but with minor changes
         def onTap(self, param):
+            # log("[TRANSCRIBER] onTap() called")
             this = param.thisObject
 
             parent = get_private_field(this, "parent")
@@ -285,12 +287,15 @@ class TestPlugin(BasePlugin):
                     pass
             set_private_field(this, "pressed", False)
             if processClick:
+                # log("[TRANSCRIBER] processClick is True")
                 if toOpen:
                     set_private_field(this, "clickedToOpen", True)
 
                 self.transcribePressed(param, parent.getMessageObject(), toOpen)
-
+                
+            # The logic is mostly identical to TranscribeButton.java but with minor changes
         def transcribePressed(self, param, messageObject, open):
+            # log("[TRANSCRIBER] transcribePressed() called")
             provider = self.plugin.get_setting("provider", 0)
             if provider == 0:
                 token = self.plugin.get_setting("token_assemblyai", "")
@@ -323,13 +328,16 @@ class TestPlugin(BasePlugin):
             dialogId = DialogObject.getPeerDialogId(peer)
             messageId = messageObject.messageOwner.id
             if open:
+                    # log("[TRANSCRIBER] open is True")
                 if messageObject.messageOwner.voiceTranscription != None and messageObject.messageOwner.voiceTranscriptionFinal:
+                    # log("[TRANSCRIBER] The message already has transcription")
                     TranscribeButton.openVideoTranscription(messageObject)
                     messageObject.messageOwner.voiceTranscriptionOpen = True
                     MessagesStorage.getInstance(account).updateMessageVoiceTranscriptionOpen(dialogId, messageId, messageObject.messageOwner)
                     run_on_ui_thread(lambda: NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.voiceTranscriptionUpdate, messageObject, None, None, True, True))
                 else:
-                    id = messageId
+                    # log("[TRANSCRIBER] Message doesn't have transcription")
+                    id = messageId. # Not ideal, but good enough
 
                     if transcribeOperationsByDialogPosition == None:
                         set_private_field(this, "transcribeOperationsByDialogPosition", HashMap())
@@ -342,7 +350,8 @@ class TestPlugin(BasePlugin):
                     transcribeOperationsById.put(id, messageObject)
 
                     messageObject.messageOwner.voiceTranscriptionId = id
-
+                    
+                    # Fixes loading animation not playing when reopening the chat
                     MessagesStorage.getInstance(account).updateMessageVoiceTranscription(dialogId, messageId, "", messageObject.messageOwner)
 
                     run_on_queue(lambda: self.transcribe(messageObject, account, dialogId, messageId, id, this))
@@ -352,6 +361,7 @@ class TestPlugin(BasePlugin):
                 messageObject.messageOwner.voiceTranscriptionOpen = False
                 MessagesStorage.getInstance(account).updateMessageVoiceTranscriptionOpen(dialogId, messageId, messageObject.messageOwner)
                 run_on_ui_thread(lambda: NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.voiceTranscriptionUpdate, messageObject, None, None, False, None))
+            # Identical to TranscribeButton.java
 
         def reqInfoHash(self, messageObject):
             if messageObject == None:
@@ -370,14 +380,16 @@ class TestPlugin(BasePlugin):
                 log("[TRANSCRIBER] " + str(path))
                 self.stop_animations(this, messageObject, account, dialogId, messageId)
                 return
+            # log("[TRANSCRIBER] Got path")
 
-            if self.plugin.get_setting("convert_to_audio", True) == True and messageObject.type == 5:
+            if self.plugin.get_setting("convert_to_audio", True) == True and messageObject.type == 5:  # TYPE_ROUND_VIDEO
                 path = self.extract_audio_from_mp4(path)
                 if isinstance(path, Exception):
                     run_on_ui_thread(lambda: BulletinHelper.show_error(f"{localization.get_string('error_get_audio_path')}: {path}"))
                     log("[TRANSCRIBER] " + str(path))
                     self.stop_animations(this, messageObject, account, dialogId, messageId)
                     return
+            # log("[TRANSCRIBER] Converted to audio")
 
             text = self.send_transcription_request(path)
             if isinstance(text, Exception):
@@ -385,6 +397,7 @@ class TestPlugin(BasePlugin):
                 log("[TRANSCRIBER] " + str(path))
                 self.stop_animations(this, messageObject, account, dialogId, messageId)
                 return
+            # log("[TRANSCRIBER] Got text")
 
             finalText = text
             finalId = id
@@ -396,6 +409,7 @@ class TestPlugin(BasePlugin):
             transcribeOperationsByDialogPosition.remove(self.reqInfoHash(messageObject))
             run_on_ui_thread(lambda: this.finishTranscription(messageObject, finalId, finalText))
             this.showOffTranscribe(messageObject)
+            # log("[TRANSCRIBER] Transcription successful")
 
         def stop_animations(self, this, messageObject, account, messageId):
             transcribeOperationsByDialogPosition = get_private_field(this, "transcribeOperationsByDialogPosition")
@@ -469,7 +483,7 @@ class TestPlugin(BasePlugin):
 
                 muxer.start()
 
-                buffer = ByteBuffer.allocate(1024 * 1024)
+                buffer = ByteBuffer.allocate(1024 * 1024). # 1MB buffer
 
                 while True:
                     sample_size = extractor.readSampleData(buffer, 0)
@@ -496,6 +510,7 @@ class TestPlugin(BasePlugin):
                 extractor.release()
 
         def send_transcription_request(self, path):
+            # log("[TRANSCRIBER] send_transcription_request called")
             provider = self.plugin.get_setting("provider", 0)
             if provider == 0:
                 token = self.plugin.get_setting("token_assemblyai", "")
@@ -506,7 +521,7 @@ class TestPlugin(BasePlugin):
             else:
                 token = self.plugin.get_setting("token_gemini", "")
             try:
-                if provider == 0:
+                if provider == 0:  # AssemblyAI
                     base_url = "https://api.assemblyai.com"
                     headers = {"authorization": token}
 
@@ -536,7 +551,7 @@ class TestPlugin(BasePlugin):
                     else:
                         raise TimeoutError("Timed out")
 
-                elif provider == 1:
+                elif provider == 1:  # Doxgram ☠️☠️
                     url = "https://api.deepgram.com/v1/listen?model=nova-3-general&punctuate=true&detect_language=true"
                     headers = {
                         "Authorization": f"Token {token}",
