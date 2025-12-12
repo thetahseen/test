@@ -553,57 +553,6 @@ async def _setgw(client: Client, message: Message):
                     await message.edit_text(f"Current default gem id: {current}")
                 return
 
-            if tokens[2].lower() == "user":
-                if len(tokens) == 3:
-                    await message.edit_text("Usage: setgw role user <user_id> [GemNameOrId|clear]")
-                    return
-                try:
-                    user_id = int(tokens[3])
-                except Exception:
-                    await message.edit_text("Invalid user id. Usage: setgw role user <user_id> [GemNameOrId|clear]")
-                    return
-
-                if len(tokens) == 4:
-                    user_gem = db.get(GWEB_SETTINGS, f"user_gem.{user_id}") or "None"
-                    try:
-                        gem_client = await _get_gem_client()
-                        await gem_client.fetch_gems(include_hidden=True)
-                        gem_obj = gem_client.gems.get(id=user_gem) if user_gem != "None" else None
-                        name = gem_obj.name if gem_obj else user_gem
-                        await message.edit_text(f"User {user_id} gem: {name}")
-                    except Exception:
-                        await message.edit_text(f"User {user_id} gem id: {user_gem}")
-                    return
-
-                if len(tokens) >= 5:
-                    arg = " ".join(tokens[4:])
-                    if arg.lower() == "clear" or arg.lower() == "none":
-                        db.remove(GWEB_SETTINGS, f"user_gem.{user_id}")
-                        await message.edit_text(f"Cleared gem for user: {user_id}")
-                        return
-                    gem_identifier = arg
-                    try:
-                        gem_client = await _get_gem_client()
-                        await gem_client.fetch_gems(include_hidden=True)
-                        gem_obj = None
-                        try:
-                            gem_obj = gem_client.gems.get(id=gem_identifier)
-                        except Exception:
-                            gem_obj = None
-                        if not gem_obj:
-                            for g in gem_client.gems:
-                                if g.name and g.name.strip().lower() == gem_identifier.strip().lower():
-                                    gem_obj = g
-                                    break
-                        if not gem_obj:
-                            await message.edit_text(f"Gem not found: {gem_identifier}")
-                            return
-                        db.set(GWEB_SETTINGS, f"user_gem.{user_id}", gem_obj.id)
-                        await message.edit_text(f"User {user_id} gem set to: {gem_obj.name} ({gem_obj.id})")
-                    except Exception as e:
-                        await message.edit_text(f"Failed to set user's gem: {e}")
-                    return
-
             gem_identifier = " ".join(tokens[2:])
             try:
                 gem_client = await _get_gem_client()
@@ -627,13 +576,13 @@ async def _setgw(client: Client, message: Message):
                 await message.edit_text(f"Failed to set default gem: {e}")
             return
 
-        await message.edit_text("Usage:\n- setgw -> list gems\n- setgw role <GemNameOrId> -> set global default\n- setgw role -> show current default\n- setgw role user <user_id> [GemNameOrId|clear] -> manage per-user gem")
+        await message.edit_text("Usage:\n- setgw -> list gems\n- setgw role <GemNameOrId> -> set global default\n- setgw role -> show current default")
     except Exception as e:
         await _safe_send_to_me(client, f"setgw error:\n\n{e}")
 
 
 modules_help["gweb"] = {
     "gweb on/off/del/all/r [user_id]": "Manage gweb auto-replies for users.",
-    "setgw / setgweb": "List custom gems and set global default gem or per-user gem. Usage: setgw, setgw role <GemNameOrId>, setgw role user <user_id> <GemNameOrId>, setgw role user <user_id> clear",
+    "setgw / setgweb": "List custom gems and set global default gem or per-chat via gwrole. Usage: setgw, setgw role <GemNameOrId>",
     "Auto-reply to private messages": "Uses gemini_webapi (cookie-based) to reply and saves per-user Gemini chat metadata (no local transcript). Supports buffered messages, sticker/GIF buffering, typing actions and sending images returned by Gemini.",
 }
