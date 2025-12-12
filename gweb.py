@@ -294,17 +294,9 @@ async def gweb_file_handler(client: Client, message: Message):
 
         if message.media_group_id:
             if not hasattr(client, "media_buffer"):
-                client.media_buffer = defaultdict(list)  # media_group_id -> list of dicts {path, caption}
+                client.media_buffer = defaultdict(list)
                 client.media_timers = {}
 
-            filename = getattr(message.document or message.video or message.audio or message.photo, "file_name", None)
-            ext_map = {
-                "voice": ".ogg",
-                "video_note": ".mp4",
-                "video": ".mp4",
-                "audio": ".mp3",
-                "document": ".bin",
-            }
             if message.photo:
                 path = await client.download_media(message.photo)
             else:
@@ -314,7 +306,7 @@ async def gweb_file_handler(client: Client, message: Message):
             if client.media_timers.get(message.media_group_id):
                 client.media_timers[message.media_group_id].cancel()
 
-            async def process_media_group(media_group_id: str, owner_id: int):
+            async def process_media_group(media_group_id: str, owner_id: int, chat_id: int):
                 await asyncio.sleep(3)
                 entries = client.media_buffer.pop(media_group_id, [])
                 client.media_timers.pop(media_group_id, None)
@@ -330,8 +322,7 @@ async def gweb_file_handler(client: Client, message: Message):
                 try:
                     gem_client = await get_client()
                 except Exception as e:
-                    await send_reply(client.send_message, [message.chat.id, f"❌ Gemini client error: {e}"], {}, client)
-                    # cleanup files
+                    await send_reply(client.send_message, [chat_id, f"❌ Gemini client error: {e}"], {}, client)
                     for p in files:
                         try:
                             if p.exists():
@@ -346,10 +337,12 @@ async def gweb_file_handler(client: Client, message: Message):
                 metadata = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{owner_id}", None)
                 chat = gem_client.start_chat(metadata=metadata, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=metadata)
 
+                await send_typing_action(client, chat_id, send_prompt)
+
                 try:
                     response = await chat.send_message(send_prompt, files=files if files else None)
                 except Exception as e:
-                    await send_reply(client.send_message, [message.chat.id, f"❌ Gemini error: {e}"], {}, client)
+                    await send_reply(client.send_message, [chat_id, f"❌ Gemini error: {e}"], {}, client)
                     for p in files:
                         try:
                             if p.exists():
@@ -374,9 +367,9 @@ async def gweb_file_handler(client: Client, message: Message):
                             if isinstance(image, GeneratedImage):
                                 file_path_img = os.path.join(TEMP_IMAGE_DIR, f"gweb_gen_{owner_id}_{i}.png")
                                 await image.save(path=TEMP_IMAGE_DIR, filename=f"gweb_gen_{owner_id}_{i}.png", verbose=True)
-                                await send_reply(client.send_photo, [message.chat.id, file_path_img], {"reply_to_message_id": message.id, "cleanup_file": file_path_img}, client)
+                                await send_reply(client.send_photo, [chat_id, file_path_img], {"reply_to_message_id": message.id, "cleanup_file": file_path_img}, client)
                             elif isinstance(image, WebImage):
-                                await send_reply(client.send_photo, [message.chat.id, image.url], {"reply_to_message_id": message.id}, client)
+                                await send_reply(client.send_photo, [chat_id, image.url], {"reply_to_message_id": message.id}, client)
                         except Exception:
                             pass
 
@@ -389,7 +382,7 @@ async def gweb_file_handler(client: Client, message: Message):
                     except Exception:
                         pass
 
-            client.media_timers[message.media_group_id] = asyncio.create_task(process_media_group(message.media_group_id, user_id))
+            client.media_timers[message.media_group_id] = asyncio.create_task(process_media_group(message.media_group_id, user_id, message.chat.id))
             return
 
         if message.video or message.video_note:
@@ -424,6 +417,7 @@ async def gweb_file_handler(client: Client, message: Message):
         chat = gem_client.start_chat(metadata=metadata, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=metadata)
 
         prompt_text = caption or "."
+        await send_typing_action(client, message.chat.id, prompt_text)
         try:
             response = await chat.send_message(prompt_text, files=[Path(file_path)] if file_path else None)
         except Exception as e:
@@ -510,7 +504,9 @@ async def gweb_command(client: Client, message: Message):
                 disabled_users.remove(user_id)
                 db.set(GWEB_SETTINGS, "disabled_users", disabled_users)
                 changed = True
-            await send_reply(message.edit_text, [f"<spoiler>Removed: {user_id}</spoiler>" if changed else f"<spoiler>Not found: {user_id}</spoiler>"], {}, client)
+            await send_reply(
+                message.edit_text,
+                [f"<spoiler>Removed: {user_id}</spoiler>" if changed else f"<spoiler>Not found: {user_id}</spoiler>"], {}, client)
         else:
             await send_reply(message.edit_text, ["Usage: gweb [on|off|del|all|r] [user_id]"], {}, client)
 
