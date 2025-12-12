@@ -146,6 +146,16 @@ async def _send_to_gemini(
     files: Optional[List[Path]],
     reply_to: Optional[int],
 ):
+    """
+    Send prompt+files to Gemini chat and deliver response to Telegram.
+
+    Fix applied:
+    - Convert file Path objects to plain str file paths before passing to gemini_webapi.
+      Some servers/libraries detect content type from filename extension; Path objects
+      could be treated differently when serialized. Using str(paths) ensures the library
+      and underlying multipart encoding use the correct filename and extension.
+    - Ensure files have reasonable extensions when downloaded (handled at download time).
+    """
     lock = _user_locks.setdefault(user_id, asyncio.Lock())
     async with lock:
         try:
@@ -156,10 +166,15 @@ async def _send_to_gemini(
 
         chat = await _start_chat_for_user(gem_client, user_id)
 
+        # convert Paths to strings for gemini client
+        files_for_gem = None
+        if files:
+            files_for_gem = [str(p) for p in files]
+
         typing = asyncio.create_task(_typing_task(py_client, chat_id))
         try:
             try:
-                response = await chat.send_message(prompt or ".", files=files or None)
+                response = await chat.send_message(prompt or ".", files=files_for_gem)
                 await asyncio.sleep(0.25)
             except Exception as e:
                 err_text = str(e)
@@ -170,7 +185,7 @@ async def _send_to_gemini(
                     pass
                 try:
                     chat = gem_client.start_chat()
-                    response = await chat.send_message(prompt or ".", files=files or None)
+                    response = await chat.send_message(prompt or ".", files=files_for_gem)
                 except Exception as e2:
                     await _safe_send_to_me(py_client, f"❌ Gemini send failed after retry: {e2}")
                     if files:
@@ -195,6 +210,7 @@ async def _send_to_gemini(
 
         bot_response = response.text or ""
 
+        # send images first (if any)
         if getattr(response, "images", None):
             for i, image in enumerate(response.images):
                 try:
@@ -220,6 +236,10 @@ async def _send_to_gemini(
 
 
 async def _download_media_from_message(py_client: Client, message: Message) -> (List[Path], str):
+    """
+    Download a single media from a replied message and return (list_of_paths, caption).
+    Ensure sensible file extensions are used so Gemini can detect media type from filename.
+    """
     files: List[Path] = []
     caption = message.caption.strip() if message.caption else ""
     for attr in ["document", "audio", "video", "voice", "video_note"]:
@@ -485,7 +505,6 @@ async def _setgw(client: Client, message: Message):
                 gem_client = await _get_gem_client()
                 await gem_client.fetch_gems(include_hidden=True)
                 all_gems = list(gem_client.gems)
-                # filter to user-created/custom gems (exclude predefined/system gems)
                 custom_gems = [g for g in all_gems if not getattr(g, "predefined", False)]
                 if not custom_gems:
                     await message.edit_text("No custom gems found for this account.")
