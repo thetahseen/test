@@ -3,7 +3,7 @@ import os
 import random
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message
@@ -22,81 +22,78 @@ GWEB_HISTORY_COLLECTION = "custom.gweb"
 GWEB_SETTINGS = "custom.gweb_settings"
 DEFAULT_HISTORY_COMBINE_SECONDS = 8
 
-enabled_users = db.get(GWEB_SETTINGS, "enabled_users") or []
-disabled_users = db.get(GWEB_SETTINGS, "disabled_users") or []
-gweb_for_all = db.get(GWEB_SETTINGS, "gweb_for_all") or False
+_enabled_users = db.get(GWEB_SETTINGS, "enabled_users") or []
+_disabled_users = db.get(GWEB_SETTINGS, "disabled_users") or []
+_gweb_for_all = db.get(GWEB_SETTINGS, "gweb_for_all") or False
 
-reply_queue = asyncio.Queue()
-reply_worker_started = False
+_reply_queue: asyncio.Queue = asyncio.Queue()
+_reply_worker_started = False
+
+_smileys = ["-.-", "):", ":)", "*.*", ")*", ";)"]
+_sticker_buffer = defaultdict(list)
+_sticker_timers: Dict[int, asyncio.Task] = {}
+
+_media_buffer = defaultdict(list)  # media_group_id -> list of dicts
+_media_timers: Dict[str, asyncio.Task] = {}
+
+_gem_client = None
+_gem_client_lock = asyncio.Lock()
+_user_locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
-async def reply_worker(client: Client):
+async def _reply_worker(py_client: Client):
     while True:
-        reply_func, args, kwargs = await reply_queue.get()
+        reply_func, args, kwargs = await _reply_queue.get()
         cleanup_file = kwargs.pop("cleanup_file", None)
         try:
             try:
                 await reply_func(*args, **kwargs)
             except FloodWait as e:
                 try:
-                    await client.send_message("me", f"FloodWait: sleeping {e.value}s")
+                    await py_client.send_message("me", f"FloodWait: sleeping {e.value}s")
                 except Exception:
                     pass
                 await asyncio.sleep(e.value + 1)
                 await reply_func(*args, **kwargs)
         except Exception as e:
             try:
-                await client.send_message("me", f"Reply queue error:\n{e}")
+                await py_client.send_message("me", f"Reply queue error:\n{e}")
             except Exception:
                 pass
         finally:
-            if cleanup_file and os.path.exists(cleanup_file):
+            if cleanup_file:
                 try:
-                    os.remove(cleanup_file)
+                    if os.path.exists(cleanup_file):
+                        os.remove(cleanup_file)
                 except Exception:
                     pass
         await asyncio.sleep(2.1)
 
 
-def ensure_reply_worker(client: Client):
-    global reply_worker_started
-    if not reply_worker_started:
-        asyncio.create_task(reply_worker(client))
-        reply_worker_started = True
+def _ensure_reply_worker(py_client: Client):
+    global _reply_worker_started
+    if not _reply_worker_started:
+        asyncio.create_task(_reply_worker(py_client))
+        _reply_worker_started = True
 
 
-async def send_reply(reply_func, args, kwargs, client):
-    ensure_reply_worker(client)
+async def _queue_reply(reply_func, args, kwargs, py_client: Client):
+    _ensure_reply_worker(py_client)
     if isinstance(args, tuple):
         args = list(args)
-    await reply_queue.put((reply_func, args, kwargs))
+    await _reply_queue.put((reply_func, args, kwargs))
 
 
-smileys = ["-.-", "):", ":)", "*.*", ")*", ";)"]
-sticker_gif_buffer = defaultdict(list)
-sticker_gif_timer = {}
-
-
-async def process_sticker_gif_buffer(client: Client, user_id: int):
+async def _safe_send_to_me(py_client: Client, text: str):
     try:
-        await asyncio.sleep(8)
-        msgs = sticker_gif_buffer.pop(user_id, [])
-        sticker_gif_timer.pop(user_id, None)
-        if not msgs:
-            return
-        last_msg = msgs[-1]
-        random_smiley = random.choice(smileys)
-        await asyncio.sleep(random.uniform(2, 6))
-        await send_reply(last_msg.reply_text, [random_smiley], {}, client)
+        await _queue_reply(py_client.send_message, ["me", text], {}, py_client)
     except Exception:
-        try:
-            await client.send_message("me", "Sticker/GIF buffer error")
-        except Exception:
-            pass
+        pass
 
 
-async def _typing_indicator_task(py_client: Client, chat_id: int):
+async def _typing_task(py_client: Client, chat_id: int):
     try:
+        # send an immediate action then repeat periodically
         try:
             await py_client.send_chat_action(chat_id=chat_id, action=enums.ChatAction.TYPING)
         except Exception:
@@ -111,13 +108,143 @@ async def _typing_indicator_task(py_client: Client, chat_id: int):
         return
 
 
-async def _download_reply_media(replied: Message) -> List[Path]:
-    files: List[Path] = []
-    if not replied:
-        return files
+async def _get_gem_client():
+    global _gem_client
+    async with _gem_client_lock:
+        if _gem_client:
+            return _gem_client
+        try:
+            _gem_client = await get_client()
+            return _gem_client
+        except Exception as e:
+            _gem_client = None
+            raise
 
+
+async def _start_chat_for_user(gem_client, user_id: int):
+    user_gem = db.get(GWEB_SETTINGS, f"user_gem.{user_id}", None)
+    default_gem = db.get(GWEB_SETTINGS, "default_gem", None)
+    gem_to_use = user_gem or default_gem
+    meta = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", None)
+    try:
+        if gem_to_use is not None:
+            # fetch_gems only if needed (resilience)
+            try:
+                await gem_client.fetch_gems(include_hidden=True)
+            except Exception:
+                pass
+        chat = gem_client.start_chat(metadata=meta, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=meta)
+        return chat
+    except Exception:
+        # In case metadata is corrupted, clear and start fresh
+        try:
+            db.remove(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}")
+        except Exception:
+            pass
+        return gem_client.start_chat(gem=gem_to_use) if gem_to_use else gem_client.start_chat()
+
+
+async def _send_to_gemini(
+    py_client: Client,
+    user_id: int,
+    chat_id: int,
+    prompt: str,
+    files: Optional[List[Path]],
+    reply_to: Optional[int],
+):
+    lock = _user_locks[user_id]
+    async with lock:
+        try:
+            gem_client = await _get_gem_client()
+        except Exception as e:
+            await _safe_send_to_me(py_client, f"❌ Gemini client error: {e}")
+            return
+
+        chat = await _start_chat_for_user(gem_client, user_id)
+
+        typing = asyncio.create_task(_typing_task(py_client, chat_id))
+        try:
+            try:
+                response = await chat.send_message(prompt or ".", files=files or None)
+                # small sleep to ensure typing is seen before stopping
+                await asyncio.sleep(0.25)
+            except Exception as e:
+                # on invalid data or other failures, clear saved metadata once and retry
+                err_text = str(e)
+                await _safe_send_to_me(py_client, f"❌ Gemini send error (will retry once): {err_text}")
+                try:
+                    db.remove(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}")
+                except Exception:
+                    pass
+                try:
+                    chat = gem_client.start_chat()  # fresh chat
+                    response = await chat.send_message(prompt or ".", files=files or None)
+                except Exception as e2:
+                    await _safe_send_to_me(py_client, f"❌ Gemini send failed after retry: {e2}")
+                    # cleanup files
+                    if files:
+                        for p in files:
+                            try:
+                                if p.exists():
+                                    os.remove(p)
+                            except Exception:
+                                pass
+                    return
+        finally:
+            typing.cancel()
+            try:
+                await typing
+            except Exception:
+                pass
+
+        # persist metadata
+        try:
+            db.set(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", chat.metadata)
+        except Exception:
+            pass
+
+        bot_response = response.text or ""
+        # persist history
+        try:
+            full_history = db.get(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}") or []
+            full_history.append(f"Bot: {bot_response}")
+            db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}", full_history)
+        except Exception:
+            pass
+
+        # send images first (if any)
+        if getattr(response, "images", None):
+            for i, image in enumerate(response.images):
+                try:
+                    if isinstance(image, GeneratedImage):
+                        fp = os.path.join(TEMP_IMAGE_DIR, f"gweb_gen_{user_id}_{i}.png")
+                        await image.save(path=TEMP_IMAGE_DIR, filename=f"gweb_gen_{user_id}_{i}.png", verbose=True)
+                        await _queue_reply(py_client.send_photo, [chat_id, fp], {"reply_to_message_id": reply_to, "cleanup_file": fp}, py_client)
+                    elif isinstance(image, WebImage):
+                        await _queue_reply(py_client.send_photo, [chat_id, image.url], {"reply_to_message_id": reply_to}, py_client)
+                except Exception:
+                    pass
+
+        # send textual reply; reply_to only if replying to media (reply_to passed) else plain message
+        kwargs = {"reply_to_message_id": reply_to} if reply_to else {}
+        await _queue_reply(py_client.send_message, [chat_id, bot_response], kwargs, py_client)
+
+        # cleanup local files
+        if files:
+            for p in files:
+                try:
+                    if p.exists():
+                        os.remove(p)
+                except Exception:
+                    pass
+
+
+async def _download_media_from_message(py_client: Client, message: Message) -> (List[Path], str):
+    files: List[Path] = []
+    caption = message.caption.strip() if message.caption else ""
+    # media_group handling is done elsewhere; here we download one media from replied message
     for attr in ["document", "audio", "video", "voice", "video_note"]:
-        media_obj = getattr(replied, attr, None)
+        media_obj = getattr(message, attr, None)
         if media_obj:
             filename = getattr(media_obj, "file_name", None)
             ext_map = {
@@ -130,371 +257,281 @@ async def _download_reply_media(replied: Message) -> List[Path]:
             ext = Path(filename).suffix if filename else ext_map.get(attr, ".bin")
             path = os.path.join(TEMP_FILE_DIR, f"{media_obj.file_unique_id}{ext}")
             try:
-                await replied.download(path)
+                await message.download(path)
                 files.append(Path(path))
             except Exception:
                 pass
-            return files
+            return files, caption
 
-    if replied.photo:
-        path = os.path.join(TEMP_FILE_DIR, f"{replied.photo.file_unique_id}.jpg")
+    if message.photo:
+        path = os.path.join(TEMP_FILE_DIR, f"{message.photo.file_unique_id}.jpg")
         try:
-            await replied.download(path)
+            await message.download(path)
             files.append(Path(path))
         except Exception:
             pass
-
-    return files
-
-
-async def _handle_gemini_response_and_reply(
-    py_client: Client,
-    gem_chat,
-    user_id: int,
-    chat_id: int,
-    prompt: str,
-    files: Optional[List[Path]],
-    reply_to_message_id: Optional[int],
-):
-    typing_task = asyncio.create_task(_typing_indicator_task(py_client, chat_id))
-    try:
-        try:
-            response = await gem_chat.send_message(prompt or ".", files=files if files else None)
-        except Exception as e:
-            await send_reply(py_client.send_message, ["me", f"❌ Gemini error: {e}"], {}, py_client)
-            if files:
-                for p in files:
-                    try:
-                        if p.exists():
-                            os.remove(p)
-                    except Exception:
-                        pass
-            return
-    finally:
-        typing_task.cancel()
-        try:
-            await typing_task
-        except Exception:
-            pass
-
-    try:
-        db.set(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", gem_chat.metadata)
-    except Exception:
-        pass
-
-    bot_response = response.text or "❌ No answer found."
-
-    full_history = db.get(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}") or []
-    full_history.append(f"Bot: {bot_response}")
-    db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}", full_history)
-
-    if getattr(response, "images", None):
-        for i, image in enumerate(response.images):
-            try:
-                if isinstance(image, GeneratedImage):
-                    file_path = os.path.join(TEMP_IMAGE_DIR, f"gweb_gen_{user_id}_{i}.png")
-                    await image.save(path=TEMP_IMAGE_DIR, filename=f"gweb_gen_{user_id}_{i}.png", verbose=True)
-                    await send_reply(py_client.send_photo, [chat_id, file_path], {"reply_to_message_id": reply_to_message_id, "cleanup_file": file_path}, py_client)
-                elif isinstance(image, WebImage):
-                    await send_reply(py_client.send_photo, [chat_id, image.url], {"reply_to_message_id": reply_to_message_id}, py_client)
-            except Exception:
-                pass
-
-    await send_reply(py_client.send_message, [chat_id, bot_response], {"reply_to_message_id": reply_to_message_id}, py_client)
-
-    if files:
-        for p in files:
-            try:
-                if p.exists():
-                    os.remove(p)
-            except Exception:
-                pass
+    return files, caption
 
 
 @Client.on_message((filters.sticker | filters.animation) & filters.private & ~filters.me & ~filters.bot, group=1)
-async def handle_sticker_gif_buffered(client: Client, message: Message):
+async def _sticker_handler(client: Client, message: Message):
     user = message.from_user
     if not user:
         return
     user_id = user.id
-    global enabled_users, disabled_users, gweb_for_all
-    enabled_users = db.get(GWEB_SETTINGS, "enabled_users") or enabled_users
-    disabled_users = db.get(GWEB_SETTINGS, "disabled_users") or disabled_users
-    gweb_for_all = db.get(GWEB_SETTINGS, "gweb_for_all") or gweb_for_all
+    global _enabled_users, _disabled_users, _gweb_for_all
+    _enabled_users = db.get(GWEB_SETTINGS, "enabled_users") or _enabled_users
+    _disabled_users = db.get(GWEB_SETTINGS, "disabled_users") or _disabled_users
+    _gweb_for_all = db.get(GWEB_SETTINGS, "gweb_for_all") or _gweb_for_all
 
-    if user_id in disabled_users or (not gweb_for_all and user_id not in enabled_users):
+    if user_id in _disabled_users or (not _gweb_for_all and user_id not in _enabled_users):
         return
 
-    sticker_gif_buffer[user_id].append(message)
-    if sticker_gif_timer.get(user_id):
-        sticker_gif_timer[user_id].cancel()
-    sticker_gif_timer[user_id] = asyncio.create_task(process_sticker_gif_buffer(client, user_id))
-
-
-@Client.on_message(filters.text & filters.private & ~filters.me & ~filters.bot, group=1)
-async def gweb_message_handler(client: Client, message: Message):
-    try:
-        user = message.from_user
-        if not user:
-            return
-        user_id = user.id
-        user_name = user.first_name or "User"
-        user_message = message.text.strip()
-        global enabled_users, disabled_users, gweb_for_all
-        enabled_users = db.get(GWEB_SETTINGS, "enabled_users") or enabled_users
-        disabled_users = db.get(GWEB_SETTINGS, "disabled_users") or disabled_users
-        gweb_for_all = db.get(GWEB_SETTINGS, "gweb_for_all") or gweb_for_all
-
-        if user_id in disabled_users or (not gweb_for_all and user_id not in enabled_users):
-            return
-
-        if not hasattr(client, "gweb_message_buffer"):
-            client.gweb_message_buffer = {}
-            client.gweb_message_timers = {}
-
-        if user_id not in client.gweb_message_buffer:
-            client.gweb_message_buffer[user_id] = []
-            client.gweb_message_timers[user_id] = None
-
-        client.gweb_message_buffer[user_id].append(user_message)
-
-        if client.gweb_message_timers[user_id]:
-            client.gweb_message_timers[user_id].cancel()
-
-        async def process_combined_messages():
-            await asyncio.sleep(DEFAULT_HISTORY_COMBINE_SECONDS)
-            buffered_messages = client.gweb_message_buffer.pop(user_id, [])
-            client.gweb_message_timers[user_id] = None
-            if not buffered_messages:
-                return
-            combined_message = "\n".join(buffered_messages)
-            await asyncio.sleep(random.choice([1, 2, 3]))
-            files = []
-            if message.reply_to_message:
-                files = await _download_reply_media(message.reply_to_message)
-            history = db.get(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}") or []
-            history.append(f"{user_name}: {combined_message}")
-            db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}", history)
-            try:
-                gem_client = await get_client()
-            except Exception as e:
-                await send_reply(client.send_message, ["me", f"❌ Gemini client error: {e}"], {}, client)
-                return
-
-            user_gem_id = db.get(GWEB_SETTINGS, f"user_gem.{user_id}", None)
-            default_gem_id = db.get(GWEB_SETTINGS, "default_gem", None)
-            gem_to_use = user_gem_id or default_gem_id
-
-            if gem_to_use is not None:
-                try:
-                    await gem_client.fetch_gems(include_hidden=True)
-                except Exception:
-                    pass
-
-            metadata = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", None)
-            chat = gem_client.start_chat(metadata=metadata, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=metadata)
-
-            prompt = combined_message or "."
-            await _handle_gemini_response_and_reply(client, chat, user_id, message.chat.id, prompt, files, message.id)
-
-        client.gweb_message_timers[user_id] = asyncio.create_task(process_combined_messages())
-
-    except Exception as e:
+    meta = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", None)
+    if meta is None:
         try:
-            await send_reply(client.send_message, ["me", f"gweb message handler error:\n\n{e}"], {}, client)
+            gem_client = await _get_gem_client()
+            chat = await _start_chat_for_user(gem_client, user_id)
+            # seed conversation with Hello (no reply_to)
+            await _send_to_gemini(client, user_id, message.chat.id, "Hello", None, None)
+        except Exception as e:
+            await _safe_send_to_me(client, f"❌ gweb sticker seed error: {e}")
+        return
+
+    # buffer for smiley response behavior
+    _sticker_buffer[user_id].append(message)
+    if _sticker_timers.get(user_id):
+        _sticker_timers[user_id].cancel()
+
+    async def _process_sticker_buffer(uid: int):
+        await asyncio.sleep(8)
+        msgs = _sticker_buffer.pop(uid, [])
+        _sticker_timers.pop(uid, None)
+        if not msgs:
+            return
+        last_msg = msgs[-1]
+        # small random delay
+        await asyncio.sleep(random.uniform(2, 6))
+        try:
+            await _queue_reply(client.send_message, [last_msg.chat.id, random.choice(_smileys)], {}, client)
         except Exception:
             pass
 
+    _sticker_timers[user_id] = asyncio.create_task(_process_sticker_buffer(user_id))
+
+
+@Client.on_message(filters.text & filters.private & ~filters.me & ~filters.bot, group=1)
+async def _text_handler(client: Client, message: Message):
+    user = message.from_user
+    if not user:
+        return
+    user_id = user.id
+    user_name = user.first_name or "User"
+    global _enabled_users, _disabled_users, _gweb_for_all
+    _enabled_users = db.get(GWEB_SETTINGS, "enabled_users") or _enabled_users
+    _disabled_users = db.get(GWEB_SETTINGS, "disabled_users") or _disabled_users
+    _gweb_for_all = db.get(GWEB_SETTINGS, "gweb_for_all") or _gweb_for_all
+
+    if user_id in _disabled_users or (not _gweb_for_all and user_id not in _enabled_users):
+        return
+
+    if not hasattr(client, "gweb_buffer"):
+        client.gweb_buffer = {}
+        client.gweb_timers = {}
+
+    if user_id not in client.gweb_buffer:
+        client.gweb_buffer[user_id] = []
+        client.gweb_timers[user_id] = None
+
+    client.gweb_buffer[user_id].append(message.text.strip())
+
+    if client.gweb_timers[user_id]:
+        client.gweb_timers[user_id].cancel()
+
+    async def _process_text_buffer(msg: Message):
+        await asyncio.sleep(DEFAULT_HISTORY_COMBINE_SECONDS)
+        texts = client.gweb_buffer.pop(user_id, [])
+        client.gweb_timers[user_id] = None
+        if not texts:
+            return
+        # put each message on a new line to avoid confusing Gemini
+        combined = "\n".join(t.strip() for t in texts if t and t.strip())
+        # small natural delay
+        await asyncio.sleep(random.choice([1, 2, 3]))
+        files = []
+        if message.reply_to_message:
+            files, cap = await _download_media_from_message(client, message.reply_to_message)
+            # prefer caption from replied media if present
+            if cap:
+                combined = f"{cap}\n\n{combined}"
+        # persist history
+        try:
+            hist = db.get(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}") or []
+            hist.append(f"{user_name}: {combined}")
+            db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}", hist)
+        except Exception:
+            pass
+
+        # only reply to message if this was a media reply; normal text replies are sent as plain messages
+        reply_to = message.reply_to_message.id if message.reply_to_message and files else None
+        await _send_to_gemini(client, user_id, message.chat.id, combined or ".", files or None, reply_to)
+
+    client.gweb_timers[user_id] = asyncio.create_task(_process_text_buffer(message))
+
 
 @Client.on_message(filters.private & ~filters.me & ~filters.bot, group=1)
-async def gweb_file_handler(client: Client, message: Message):
+async def _file_handler(client: Client, message: Message):
+    user = message.from_user
+    if not user:
+        return
+    user_id = user.id
+    user_name = user.first_name or "User"
+    global _enabled_users, _disabled_users, _gweb_for_all
+    _enabled_users = db.get(GWEB_SETTINGS, "enabled_users") or _enabled_users
+    _disabled_users = db.get(GWEB_SETTINGS, "disabled_users") or _disabled_users
+    _gweb_for_all = db.get(GWEB_SETTINGS, "gweb_for_all") or _gweb_for_all
+
+    if user_id in _disabled_users or (not _gweb_for_all and user_id not in _enabled_users):
+        return
+
+    caption = message.caption.strip() if message.caption else ""
+    try:
+        hist = db.get(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}") or []
+        hist.append(f"{user_name}: {caption}")
+        db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}", hist)
+    except Exception:
+        pass
+
+    # handle media albums (media_group_id)
+    if message.media_group_id:
+        if not hasattr(client, "media_buffer"):
+            client.media_buffer = defaultdict(list)
+            client.media_timers = {}
+
+        if message.photo:
+            path = await client.download_media(message.photo)
+        else:
+            path = await client.download_media(message.document or message.video or message.audio or message.voice or message.video_note)
+
+        client.media_buffer[message.media_group_id].append({"path": path, "caption": caption, "reply_to": message.id, "owner": user_id, "chat_id": message.chat.id})
+
+        if client.media_timers.get(message.media_group_id):
+            client.media_timers[message.media_group_id].cancel()
+
+        async def _process_media_group(media_group_id: str):
+            await asyncio.sleep(3)
+            entries = client.media_buffer.pop(media_group_id, [])
+            client.media_timers.pop(media_group_id, None)
+            if not entries:
+                return
+            files = [Path(e["path"]) for e in entries if e.get("path")]
+            reply_to = entries[0].get("reply_to")
+            owner = entries[0].get("owner")
+            chat_id = entries[0].get("chat_id")
+            caption_text = ""
+            for e in entries:
+                if e.get("caption"):
+                    caption_text = e.get("caption")
+                    break
+            prompt = caption_text or "."
+            # send; reply_to only if media (we pass reply_to)
+            await _send_to_gemini(client, owner, chat_id, prompt, files, reply_to)
+
+        client.media_timers[message.media_group_id] = asyncio.create_task(_process_media_group(message.media_group_id))
+        return
+
+    # single-file message
     file_path = None
     try:
-        user = message.from_user
-        if not user:
-            return
-        user_id = user.id
-        user_name = user.first_name or "User"
-        global enabled_users, disabled_users, gweb_for_all
-        enabled_users = db.get(GWEB_SETTINGS, "enabled_users") or enabled_users
-        disabled_users = db.get(GWEB_SETTINGS, "disabled_users") or disabled_users
-        gweb_for_all = db.get(GWEB_SETTINGS, "gweb_for_all") or gweb_for_all
-
-        if user_id in disabled_users or (not gweb_for_all and user_id not in enabled_users):
-            return
-
-        caption = message.caption.strip() if message.caption else ""
-        chat_history = db.get(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}") or []
-        chat_history.append(f"{user_name}: {caption}")
-        db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}", chat_history)
-
-        if message.media_group_id:
-            if not hasattr(client, "media_buffer"):
-                client.media_buffer = defaultdict(list)
-                client.media_timers = {}
-
-            if message.photo:
-                path = await client.download_media(message.photo)
-            else:
-                path = await client.download_media(message.document or message.video or message.audio or message.voice or message.video_note)
-            client.media_buffer[message.media_group_id].append({"path": path, "caption": caption, "reply_to": message.id, "owner": user_id, "chat_id": message.chat.id})
-
-            if client.media_timers.get(message.media_group_id):
-                client.media_timers[message.media_group_id].cancel()
-
-            async def process_media_group(media_group_id: str):
-                await asyncio.sleep(3)
-                entries = client.media_buffer.pop(media_group_id, [])
-                client.media_timers.pop(media_group_id, None)
-                if not entries:
-                    return
-                files = [Path(e["path"]) for e in entries if e.get("path")]
-                caption_text = ""
-                reply_to = entries[0].get("reply_to")
-                owner_id = entries[0].get("owner")
-                chat_id = entries[0].get("chat_id")
-                for e in entries:
-                    if e.get("caption"):
-                        caption_text = e.get("caption")
-                        break
-                prompt_text = caption_text or "."
-                try:
-                    gem_client = await get_client()
-                except Exception as e:
-                    await send_reply(client.send_message, ["me", f"❌ Gemini client error: {e}"], {}, client)
-                    for p in files:
-                        try:
-                            if p.exists():
-                                os.remove(p)
-                        except Exception:
-                            pass
-                    return
-
-                user_gem_id = db.get(GWEB_SETTINGS, f"user_gem.{owner_id}", None)
-                default_gem_id = db.get(GWEB_SETTINGS, "default_gem", None)
-                gem_to_use = user_gem_id or default_gem_id
-                metadata = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{owner_id}", None)
-                chat = gem_client.start_chat(metadata=metadata, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=metadata)
-
-                await _handle_gemini_response_and_reply(client, chat, owner_id, chat_id, prompt_text, files, reply_to)
-
-            client.media_timers[message.media_group_id] = asyncio.create_task(process_media_group(message.media_group_id))
-            return
-
         if message.video or message.video_note:
             file_path = await client.download_media(message.video or message.video_note)
-            file_type = "video"
         elif message.audio or message.voice:
             file_path = await client.download_media(message.audio or message.voice)
-            file_type = "audio"
         elif message.document and message.document.file_name.endswith(".pdf"):
             file_path = await client.download_media(message.document)
-            file_type = "pdf"
         elif message.document:
             file_path = await client.download_media(message.document)
-            file_type = "document"
         elif message.photo:
             file_path = await client.download_media(message.photo)
-            file_type = "image"
         else:
             return
-
-        try:
-            gem_client = await get_client()
-        except Exception as e:
-            await send_reply(client.send_message, ["me", f"❌ Gemini client error: {e}"], {}, client)
-            return
-
-        user_gem_id = db.get(GWEB_SETTINGS, f"user_gem.{user_id}", None)
-        default_gem_id = db.get(GWEB_SETTINGS, "default_gem", None)
-        gem_to_use = user_gem_id or default_gem_id
-
-        metadata = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", None)
-        chat = gem_client.start_chat(metadata=metadata, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=metadata)
-
-        prompt_text = caption or "."
-        await _handle_gemini_response_and_reply(client, chat, user_id, message.chat.id, prompt_text, [Path(file_path)] if file_path else None, message.id)
-
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"gweb file handler error:\n\n{e}"], {}, client)
-    finally:
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
+        await _safe_send_to_me(client, f"❌ media download error: {e}")
+        return
+
+    files = [Path(file_path)] if file_path else None
+    prompt = caption or "."
+    # reply_to for media messages so response appears as reply to the media
+    await _send_to_gemini(client, user_id, message.chat.id, prompt, files, message.id)
 
 
 @Client.on_message(filters.command(["gweb", "gw"], prefix) & filters.me)
-async def gweb_command(client: Client, message: Message):
+async def _gweb_admin(client: Client, message: Message):
     try:
         parts = message.text.strip().split()
         if len(parts) < 2:
-            await send_reply(message.edit_text, ["Usage: gweb [on|off|del|all|r] [user_id]"], {}, client)
+            await _queue_reply(message.edit_text, ["Usage: gweb [on|off|del|all|r] [user_id]"], {}, client)
             return
-        command = parts[1].lower()
-        user_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else message.chat.id
+        cmd = parts[1].lower()
+        target = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else message.chat.id
 
-        global enabled_users, disabled_users, gweb_for_all
-        enabled_users = db.get(GWEB_SETTINGS, "enabled_users") or enabled_users
-        disabled_users = db.get(GWEB_SETTINGS, "disabled_users") or disabled_users
-        gweb_for_all = db.get(GWEB_SETTINGS, "gweb_for_all") or gweb_for_all
+        global _enabled_users, _disabled_users, _gweb_for_all
+        _enabled_users = db.get(GWEB_SETTINGS, "enabled_users") or _enabled_users
+        _disabled_users = db.get(GWEB_SETTINGS, "disabled_users") or _disabled_users
+        _gweb_for_all = db.get(GWEB_SETTINGS, "gweb_for_all") or _gweb_for_all
 
-        if command == "on":
-            if user_id in disabled_users:
-                disabled_users.remove(user_id)
-                db.set(GWEB_SETTINGS, "disabled_users", disabled_users)
-            if user_id not in enabled_users:
-                enabled_users.append(user_id)
-                db.set(GWEB_SETTINGS, "enabled_users", enabled_users)
-            await send_reply(message.edit_text, [f"<spoiler>ON: {user_id}</spoiler>"], {}, client)
-        elif command == "off":
-            if user_id not in disabled_users:
-                disabled_users.append(user_id)
-                db.set(GWEB_SETTINGS, "disabled_users", disabled_users)
-            if user_id in enabled_users:
-                enabled_users.remove(user_id)
-                db.set(GWEB_SETTINGS, "enabled_users", enabled_users)
-            await send_reply(message.edit_text, [f"<spoiler>OFF: {user_id}</spoiler>"], {}, client)
-        elif command == "del":
-            db.remove(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}")
-            db.remove(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}")
-            await send_reply(message.edit_text, [f"<spoiler>Deleted: {user_id}</spoiler>"], {}, client)
-        elif command == "all":
-            gweb_for_all = not gweb_for_all
-            db.set(GWEB_SETTINGS, "gweb_for_all", gweb_for_all)
-            await send_reply(message.edit_text, [f"All: {'enabled' if gweb_for_all else 'disabled'}"], {}, client)
-        elif command == "r":
+        if cmd == "on":
+            if target in _disabled_users:
+                _disabled_users.remove(target)
+                db.set(GWEB_SETTINGS, "disabled_users", _disabled_users)
+            if target not in _enabled_users:
+                _enabled_users.append(target)
+                db.set(GWEB_SETTINGS, "enabled_users", _enabled_users)
+            await _queue_reply(message.edit_text, [f"<spoiler>ON: {target}</spoiler>"], {}, client)
+        elif cmd == "off":
+            if target not in _disabled_users:
+                _disabled_users.append(target)
+                db.set(GWEB_SETTINGS, "disabled_users", _disabled_users)
+            if target in _enabled_users:
+                _enabled_users.remove(target)
+                db.set(GWEB_SETTINGS, "enabled_users", _enabled_users)
+            await _queue_reply(message.edit_text, [f"<spoiler>OFF: {target}</spoiler>"], {}, client)
+        elif cmd == "del":
+            db.remove(GWEB_HISTORY_COLLECTION, f"chat_history.{target}")
+            db.remove(GWEB_HISTORY_COLLECTION, f"chat_metadata.{target}")
+            await _queue_reply(message.edit_text, [f"<spoiler>Deleted: {target}</spoiler>"], {}, client)
+        elif cmd == "all":
+            _gweb_for_all = not _gweb_for_all
+            db.set(GWEB_SETTINGS, "gweb_for_all", _gweb_for_all)
+            await _queue_reply(message.edit_text, [f"All: {'enabled' if _gweb_for_all else 'disabled'}"], {}, client)
+        elif cmd == "r":
             changed = False
-            if user_id in enabled_users:
-                enabled_users.remove(user_id)
-                db.set(GWEB_SETTINGS, "enabled_users", enabled_users)
+            if target in _enabled_users:
+                _enabled_users.remove(target)
+                db.set(GWEB_SETTINGS, "enabled_users", _enabled_users)
                 changed = True
-            if user_id in disabled_users:
-                disabled_users.remove(user_id)
-                db.set(GWEB_SETTINGS, "disabled_users", disabled_users)
+            if target in _disabled_users:
+                _disabled_users.remove(target)
+                db.set(GWEB_SETTINGS, "disabled_users", _disabled_users)
                 changed = True
-            await send_reply(
-                message.edit_text,
-                [f"<spoiler>Removed: {user_id}</spoiler>" if changed else f"<spoiler>Not found: {user_id}</spoiler>"], {}, client)
+            await _queue_reply(message.edit_text, [f"<spoiler>Removed: {target}</spoiler>" if changed else f"<spoiler>Not found: {target}</spoiler>"], {}, client)
         else:
-            await send_reply(message.edit_text, ["Usage: gweb [on|off|del|all|r] [user_id]"], {}, client)
+            await _queue_reply(message.edit_text, ["Usage: gweb [on|off|del/all/r] [user_id]"], {}, client)
 
-        await send_reply(message.delete, [], {}, client)
+        await _queue_reply(message.delete, [], {}, client)
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"gweb command error:\n\n{e}"], {}, client)
+        await _safe_send_to_me(client, f"gweb command error:\n\n{e}")
 
 
 @Client.on_message(filters.command(["setgw", "setgweb"], prefix) & filters.me)
-async def setgw_command(client: Client, message: Message):
+async def _setgw(client: Client, message: Message):
     try:
         parts = message.text.strip().split(maxsplit=2)
         sub = parts[1].lower() if len(parts) > 1 else None
-        gem_client = None
 
         if sub is None:
             try:
-                gem_client = await get_client()
+                gem_client = await _get_gem_client()
                 await gem_client.fetch_gems(include_hidden=True)
                 gems = list(gem_client.gems)
                 if not gems:
@@ -513,7 +550,7 @@ async def setgw_command(client: Client, message: Message):
             if len(parts) == 2:
                 current = db.get(GWEB_SETTINGS, "default_gem") or "None"
                 try:
-                    gem_client = await get_client()
+                    gem_client = await _get_gem_client()
                     await gem_client.fetch_gems(include_hidden=True)
                     gem_obj = gem_client.gems.get(id=current) if current != "None" else None
                     name = gem_obj.name if gem_obj else current
@@ -524,7 +561,7 @@ async def setgw_command(client: Client, message: Message):
 
             gem_identifier = parts[2].strip()
             try:
-                gem_client = await get_client()
+                gem_client = await _get_gem_client()
                 await gem_client.fetch_gems(include_hidden=True)
                 gem_obj = None
                 try:
@@ -547,7 +584,7 @@ async def setgw_command(client: Client, message: Message):
 
         await message.edit_text("Usage:\n- setgw -> list gems\n- setgw role <GemNameOrId> -> set default gem\n- setgw role -> show current default")
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"setgw error:\n\n{e}"], {}, client)
+        await _safe_send_to_me(client, f"setgw error:\n\n{e}")
 
 
 modules_help["gweb"] = {
