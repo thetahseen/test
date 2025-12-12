@@ -95,12 +95,20 @@ async def process_sticker_gif_buffer(client: Client, user_id: int):
             pass
 
 
-async def send_typing_action(client: Client, chat_id: int, user_message: str):
+async def _typing_indicator_task(py_client: Client, chat_id: int):
     try:
-        await client.send_chat_action(chat_id=chat_id, action=enums.ChatAction.TYPING)
-        await asyncio.sleep(min(len(user_message) / 10, 5))
-    except Exception:
-        pass
+        try:
+            await py_client.send_chat_action(chat_id=chat_id, action=enums.ChatAction.TYPING)
+        except Exception:
+            pass
+        while True:
+            await asyncio.sleep(4)
+            try:
+                await py_client.send_chat_action(chat_id=chat_id, action=enums.ChatAction.TYPING)
+            except Exception:
+                pass
+    except asyncio.CancelledError:
+        return
 
 
 async def _download_reply_media(replied: Message) -> List[Path]:
@@ -148,20 +156,26 @@ async def _handle_gemini_response_and_reply(
     files: Optional[List[Path]],
     reply_to_message_id: Optional[int],
 ):
-    await send_typing_action(py_client, chat_id, prompt or ".")
+    typing_task = asyncio.create_task(_typing_indicator_task(py_client, chat_id))
     try:
-        response = await gem_chat.send_message(prompt or ".", files=files if files else None)
-    except Exception as e:
-        await send_reply(py_client.send_message, [chat_id, f"❌ Gemini error: {e}"], {}, py_client)
-        # cleanup local files
-        if files:
-            for p in files:
-                try:
-                    if p.exists():
-                        os.remove(p)
-                except Exception:
-                    pass
-        return
+        try:
+            response = await gem_chat.send_message(prompt or ".", files=files if files else None)
+        except Exception as e:
+            await send_reply(py_client.send_message, ["me", f"❌ Gemini error: {e}"], {}, py_client)
+            if files:
+                for p in files:
+                    try:
+                        if p.exists():
+                            os.remove(p)
+                    except Exception:
+                        pass
+            return
+    finally:
+        typing_task.cancel()
+        try:
+            await typing_task
+        except Exception:
+            pass
 
     try:
         db.set(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", gem_chat.metadata)
@@ -253,7 +267,7 @@ async def gweb_message_handler(client: Client, message: Message):
             client.gweb_message_timers[user_id] = None
             if not buffered_messages:
                 return
-            combined_message = " ".join(buffered_messages)
+            combined_message = "\n".join(buffered_messages)
             await asyncio.sleep(random.choice([1, 2, 3]))
             files = []
             if message.reply_to_message:
@@ -264,7 +278,7 @@ async def gweb_message_handler(client: Client, message: Message):
             try:
                 gem_client = await get_client()
             except Exception as e:
-                await send_reply(client.send_message, [message.chat.id, f"❌ Gemini client error: {e}"], {}, client)
+                await send_reply(client.send_message, ["me", f"❌ Gemini client error: {e}"], {}, client)
                 return
 
             user_gem_id = db.get(GWEB_SETTINGS, f"user_gem.{user_id}", None)
@@ -347,7 +361,7 @@ async def gweb_file_handler(client: Client, message: Message):
                 try:
                     gem_client = await get_client()
                 except Exception as e:
-                    await send_reply(client.send_message, [chat_id, f"❌ Gemini client error: {e}"], {}, client)
+                    await send_reply(client.send_message, ["me", f"❌ Gemini client error: {e}"], {}, client)
                     for p in files:
                         try:
                             if p.exists():
@@ -388,7 +402,7 @@ async def gweb_file_handler(client: Client, message: Message):
         try:
             gem_client = await get_client()
         except Exception as e:
-            await send_reply(client.send_message, [message.chat.id, f"❌ Gemini client error: {e}"], {}, client)
+            await send_reply(client.send_message, ["me", f"❌ Gemini client error: {e}"], {}, client)
             return
 
         user_gem_id = db.get(GWEB_SETTINGS, f"user_gem.{user_id}", None)
