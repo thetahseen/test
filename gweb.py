@@ -421,6 +421,41 @@ async def _file_handler(client: Client, message: Message):
     await _send_to_gemini(client, user_id, message.chat.id, prompt, files, message.id)
 
 
+@Client.on_message(filters.command(["gwrole"], prefix) & filters.me)
+async def _gwrole(client: Client, message: Message):
+    try:
+        parts = message.text.strip().split(maxsplit=1)
+        target_id = message.chat.id
+        if len(parts) == 1:
+            db.remove(GWEB_SETTINGS, f"user_gem.{target_id}")
+            await _queue_reply(message.edit_text, [f"Cleared gem for this chat. Now using global default."], {}, client)
+            return
+        gem_identifier = parts[1].strip()
+        try:
+            gem_client = await _get_gem_client()
+            await gem_client.fetch_gems(include_hidden=True)
+        except Exception as e:
+            await _safe_send_to_me(client, f"❌ failed to get gem client: {e}")
+            return
+        gem_obj = None
+        try:
+            gem_obj = gem_client.gems.get(id=gem_identifier)
+        except Exception:
+            gem_obj = None
+        if not gem_obj:
+            for g in gem_client.gems:
+                if g.name and g.name.strip().lower() == gem_identifier.strip().lower():
+                    gem_obj = g
+                    break
+        if not gem_obj:
+            await _queue_reply(message.edit_text, [f"Gem not found: {gem_identifier}"], {}, client)
+            return
+        db.set(GWEB_SETTINGS, f"user_gem.{target_id}", gem_obj.id)
+        await _queue_reply(message.edit_text, [f"Gem for this chat set to: {gem_obj.name} ({gem_obj.id})"], {}, client)
+    except Exception as e:
+        await _safe_send_to_me(client, f"gwrole error:\n\n{e}")
+
+
 @Client.on_message(filters.command(["gweb", "gw"], prefix) & filters.me)
 async def _gweb_admin(client: Client, message: Message):
     try:
