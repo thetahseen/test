@@ -430,7 +430,7 @@ async def _gwrole(client: Client, message: Message):
             # clear for current chat
             target_id = message.chat.id
             db.remove(GWEB_SETTINGS, f"user_gem.{target_id}")
-            await _queue_reply(message.edit_text, [f"Cleared gem for this chat. Now using global default."], {}, client)
+            await _queue_reply(message.edit_text, [f"Role reset"], {}, client)
             await _queue_reply(message.delete, [], {}, client)
             return
 
@@ -444,7 +444,7 @@ async def _gwrole(client: Client, message: Message):
         gem_identifier = gem_identifier.strip()
         if not gem_identifier:
             db.remove(GWEB_SETTINGS, f"user_gem.{target}")
-            await _queue_reply(message.edit_text, [f"Cleared gem for {target}. Now using global default."], {}, client)
+            await _queue_reply(message.edit_text, [f"Role reset: {target}"], {}, client)
             await _queue_reply(message.delete, [], {}, client)
             return
 
