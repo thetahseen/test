@@ -146,16 +146,6 @@ async def _send_to_gemini(
     files: Optional[List[Path]],
     reply_to: Optional[int],
 ):
-    """
-    Send prompt+files to Gemini chat and deliver response to Telegram.
-
-    Fix applied:
-    - Convert file Path objects to plain str file paths before passing to gemini_webapi.
-      Some servers/libraries detect content type from filename extension; Path objects
-      could be treated differently when serialized. Using str(paths) ensures the library
-      and underlying multipart encoding use the correct filename and extension.
-    - Ensure files have reasonable extensions when downloaded (handled at download time).
-    """
     lock = _user_locks.setdefault(user_id, asyncio.Lock())
     async with lock:
         try:
@@ -166,7 +156,6 @@ async def _send_to_gemini(
 
         chat = await _start_chat_for_user(gem_client, user_id)
 
-        # convert Paths to strings for gemini client
         files_for_gem = None
         if files:
             files_for_gem = [str(p) for p in files]
@@ -210,7 +199,6 @@ async def _send_to_gemini(
 
         bot_response = response.text or ""
 
-        # send images first (if any)
         if getattr(response, "images", None):
             for i, image in enumerate(response.images):
                 try:
@@ -236,10 +224,6 @@ async def _send_to_gemini(
 
 
 async def _download_media_from_message(py_client: Client, message: Message) -> (List[Path], str):
-    """
-    Download a single media from a replied message and return (list_of_paths, caption).
-    Ensure sensible file extensions are used so Gemini can detect media type from filename.
-    """
     files: List[Path] = []
     caption = message.caption.strip() if message.caption else ""
     for attr in ["document", "audio", "video", "voice", "video_note"]:
