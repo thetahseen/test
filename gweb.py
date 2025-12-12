@@ -33,12 +33,9 @@ _smileys = ["-.-", "):", ":)", "*.*", ")*", ";)"]
 _sticker_buffer = defaultdict(list)
 _sticker_timers: Dict[int, asyncio.Task] = {}
 
-_media_buffer = defaultdict(list)  # media_group_id -> list of dicts
-_media_timers: Dict[str, asyncio.Task] = {}
-
 _gem_client = None
 _gem_client_lock = asyncio.Lock()
-_user_locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+_user_locks: Dict[int, asyncio.Lock] = {}
 
 
 async def _reply_worker(py_client: Client):
@@ -93,7 +90,6 @@ async def _safe_send_to_me(py_client: Client, text: str):
 
 async def _typing_task(py_client: Client, chat_id: int):
     try:
-        # send an immediate action then repeat periodically
         try:
             await py_client.send_chat_action(chat_id=chat_id, action=enums.ChatAction.TYPING)
         except Exception:
@@ -128,7 +124,6 @@ async def _start_chat_for_user(gem_client, user_id: int):
     meta = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", None)
     try:
         if gem_to_use is not None:
-            # fetch_gems only if needed (resilience)
             try:
                 await gem_client.fetch_gems(include_hidden=True)
             except Exception:
@@ -136,7 +131,6 @@ async def _start_chat_for_user(gem_client, user_id: int):
         chat = gem_client.start_chat(metadata=meta, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=meta)
         return chat
     except Exception:
-        # In case metadata is corrupted, clear and start fresh
         try:
             db.remove(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}")
         except Exception:
@@ -152,7 +146,7 @@ async def _send_to_gemini(
     files: Optional[List[Path]],
     reply_to: Optional[int],
 ):
-    lock = _user_locks[user_id]
+    lock = _user_locks.setdefault(user_id, asyncio.Lock())
     async with lock:
         try:
             gem_client = await _get_gem_client()
@@ -166,10 +160,8 @@ async def _send_to_gemini(
         try:
             try:
                 response = await chat.send_message(prompt or ".", files=files or None)
-                # small sleep to ensure typing is seen before stopping
                 await asyncio.sleep(0.25)
             except Exception as e:
-                # on invalid data or other failures, clear saved metadata once and retry
                 err_text = str(e)
                 await _safe_send_to_me(py_client, f"❌ Gemini send error (will retry once): {err_text}")
                 try:
@@ -177,11 +169,10 @@ async def _send_to_gemini(
                 except Exception:
                     pass
                 try:
-                    chat = gem_client.start_chat()  # fresh chat
+                    chat = gem_client.start_chat()
                     response = await chat.send_message(prompt or ".", files=files or None)
                 except Exception as e2:
                     await _safe_send_to_me(py_client, f"❌ Gemini send failed after retry: {e2}")
-                    # cleanup files
                     if files:
                         for p in files:
                             try:
@@ -197,22 +188,13 @@ async def _send_to_gemini(
             except Exception:
                 pass
 
-        # persist metadata
         try:
             db.set(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", chat.metadata)
         except Exception:
             pass
 
         bot_response = response.text or ""
-        # persist history
-        try:
-            full_history = db.get(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}") or []
-            full_history.append(f"Bot: {bot_response}")
-            db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}", full_history)
-        except Exception:
-            pass
 
-        # send images first (if any)
         if getattr(response, "images", None):
             for i, image in enumerate(response.images):
                 try:
@@ -225,11 +207,9 @@ async def _send_to_gemini(
                 except Exception:
                     pass
 
-        # send textual reply; reply_to only if replying to media (reply_to passed) else plain message
         kwargs = {"reply_to_message_id": reply_to} if reply_to else {}
         await _queue_reply(py_client.send_message, [chat_id, bot_response], kwargs, py_client)
 
-        # cleanup local files
         if files:
             for p in files:
                 try:
@@ -242,7 +222,6 @@ async def _send_to_gemini(
 async def _download_media_from_message(py_client: Client, message: Message) -> (List[Path], str):
     files: List[Path] = []
     caption = message.caption.strip() if message.caption else ""
-    # media_group handling is done elsewhere; here we download one media from replied message
     for attr in ["document", "audio", "video", "voice", "video_note"]:
         media_obj = getattr(message, attr, None)
         if media_obj:
@@ -290,15 +269,11 @@ async def _sticker_handler(client: Client, message: Message):
     meta = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", None)
     if meta is None:
         try:
-            gem_client = await _get_gem_client()
-            chat = await _start_chat_for_user(gem_client, user_id)
-            # seed conversation with Hello (no reply_to)
             await _send_to_gemini(client, user_id, message.chat.id, "Hello", None, None)
         except Exception as e:
             await _safe_send_to_me(client, f"❌ gweb sticker seed error: {e}")
         return
 
-    # buffer for smiley response behavior
     _sticker_buffer[user_id].append(message)
     if _sticker_timers.get(user_id):
         _sticker_timers[user_id].cancel()
@@ -310,7 +285,6 @@ async def _sticker_handler(client: Client, message: Message):
         if not msgs:
             return
         last_msg = msgs[-1]
-        # small random delay
         await asyncio.sleep(random.uniform(2, 6))
         try:
             await _queue_reply(client.send_message, [last_msg.chat.id, random.choice(_smileys)], {}, client)
@@ -354,25 +328,13 @@ async def _text_handler(client: Client, message: Message):
         client.gweb_timers[user_id] = None
         if not texts:
             return
-        # put each message on a new line to avoid confusing Gemini
         combined = "\n".join(t.strip() for t in texts if t and t.strip())
-        # small natural delay
         await asyncio.sleep(random.choice([1, 2, 3]))
         files = []
         if message.reply_to_message:
             files, cap = await _download_media_from_message(client, message.reply_to_message)
-            # prefer caption from replied media if present
             if cap:
                 combined = f"{cap}\n\n{combined}"
-        # persist history
-        try:
-            hist = db.get(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}") or []
-            hist.append(f"{user_name}: {combined}")
-            db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}", hist)
-        except Exception:
-            pass
-
-        # only reply to message if this was a media reply; normal text replies are sent as plain messages
         reply_to = message.reply_to_message.id if message.reply_to_message and files else None
         await _send_to_gemini(client, user_id, message.chat.id, combined or ".", files or None, reply_to)
 
@@ -395,14 +357,7 @@ async def _file_handler(client: Client, message: Message):
         return
 
     caption = message.caption.strip() if message.caption else ""
-    try:
-        hist = db.get(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}") or []
-        hist.append(f"{user_name}: {caption}")
-        db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}", hist)
-    except Exception:
-        pass
 
-    # handle media albums (media_group_id)
     if message.media_group_id:
         if not hasattr(client, "media_buffer"):
             client.media_buffer = defaultdict(list)
@@ -434,13 +389,11 @@ async def _file_handler(client: Client, message: Message):
                     caption_text = e.get("caption")
                     break
             prompt = caption_text or "."
-            # send; reply_to only if media (we pass reply_to)
             await _send_to_gemini(client, owner, chat_id, prompt, files, reply_to)
 
         client.media_timers[message.media_group_id] = asyncio.create_task(_process_media_group(message.media_group_id))
         return
 
-    # single-file message
     file_path = None
     try:
         if message.video or message.video_note:
@@ -461,7 +414,6 @@ async def _file_handler(client: Client, message: Message):
 
     files = [Path(file_path)] if file_path else None
     prompt = caption or "."
-    # reply_to for media messages so response appears as reply to the media
     await _send_to_gemini(client, user_id, message.chat.id, prompt, files, message.id)
 
 
@@ -497,7 +449,6 @@ async def _gweb_admin(client: Client, message: Message):
                 db.set(GWEB_SETTINGS, "enabled_users", _enabled_users)
             await _queue_reply(message.edit_text, [f"<spoiler>OFF: {target}</spoiler>"], {}, client)
         elif cmd == "del":
-            db.remove(GWEB_HISTORY_COLLECTION, f"chat_history.{target}")
             db.remove(GWEB_HISTORY_COLLECTION, f"chat_metadata.{target}")
             await _queue_reply(message.edit_text, [f"<spoiler>Deleted: {target}</spoiler>"], {}, client)
         elif cmd == "all":
@@ -526,28 +477,33 @@ async def _gweb_admin(client: Client, message: Message):
 @Client.on_message(filters.command(["setgw", "setgweb"], prefix) & filters.me)
 async def _setgw(client: Client, message: Message):
     try:
-        parts = message.text.strip().split(maxsplit=2)
-        sub = parts[1].lower() if len(parts) > 1 else None
+        tokens = message.text.strip().split()
+        sub = tokens[1].lower() if len(tokens) > 1 else None
 
         if sub is None:
             try:
                 gem_client = await _get_gem_client()
                 await gem_client.fetch_gems(include_hidden=True)
-                gems = list(gem_client.gems)
-                if not gems:
-                    await message.edit_text("No gems found for this account.")
+                all_gems = list(gem_client.gems)
+                # filter to user-created/custom gems (exclude predefined/system gems)
+                custom_gems = [g for g in all_gems if not getattr(g, "predefined", False)]
+                if not custom_gems:
+                    await message.edit_text("No custom gems found for this account.")
                     return
+                default_id = db.get(GWEB_SETTINGS, "default_gem") or ""
                 lines = []
-                for i, g in enumerate(gems, start=1):
+                for i, g in enumerate(custom_gems, start=1):
                     gid = getattr(g, "id", "") or ""
-                    lines.append(f"{i}. {g.name}  —  {gid}")
-                await message.edit_text("Available gems:\n\n" + "\n".join(lines))
+                    marker = " (default)" if gid == default_id else ""
+                    name = getattr(g, "name", "") or gid
+                    lines.append(f"{i}. {name}  —  {gid}{marker}")
+                await message.edit_text("Available custom gems:\n\n" + "\n".join(lines))
             except Exception as e:
                 await message.edit_text(f"Failed to fetch gems: {e}")
             return
 
         if sub == "role":
-            if len(parts) == 2:
+            if len(tokens) == 2:
                 current = db.get(GWEB_SETTINGS, "default_gem") or "None"
                 try:
                     gem_client = await _get_gem_client()
@@ -559,7 +515,58 @@ async def _setgw(client: Client, message: Message):
                     await message.edit_text(f"Current default gem id: {current}")
                 return
 
-            gem_identifier = parts[2].strip()
+            if tokens[2].lower() == "user":
+                if len(tokens) == 3:
+                    await message.edit_text("Usage: setgw role user <user_id> [GemNameOrId|clear]")
+                    return
+                try:
+                    user_id = int(tokens[3])
+                except Exception:
+                    await message.edit_text("Invalid user id. Usage: setgw role user <user_id> [GemNameOrId|clear]")
+                    return
+
+                if len(tokens) == 4:
+                    user_gem = db.get(GWEB_SETTINGS, f"user_gem.{user_id}") or "None"
+                    try:
+                        gem_client = await _get_gem_client()
+                        await gem_client.fetch_gems(include_hidden=True)
+                        gem_obj = gem_client.gems.get(id=user_gem) if user_gem != "None" else None
+                        name = gem_obj.name if gem_obj else user_gem
+                        await message.edit_text(f"User {user_id} gem: {name}")
+                    except Exception:
+                        await message.edit_text(f"User {user_id} gem id: {user_gem}")
+                    return
+
+                if len(tokens) >= 5:
+                    arg = " ".join(tokens[4:])
+                    if arg.lower() == "clear" or arg.lower() == "none":
+                        db.remove(GWEB_SETTINGS, f"user_gem.{user_id}")
+                        await message.edit_text(f"Cleared gem for user: {user_id}")
+                        return
+                    gem_identifier = arg
+                    try:
+                        gem_client = await _get_gem_client()
+                        await gem_client.fetch_gems(include_hidden=True)
+                        gem_obj = None
+                        try:
+                            gem_obj = gem_client.gems.get(id=gem_identifier)
+                        except Exception:
+                            gem_obj = None
+                        if not gem_obj:
+                            for g in gem_client.gems:
+                                if g.name and g.name.strip().lower() == gem_identifier.strip().lower():
+                                    gem_obj = g
+                                    break
+                        if not gem_obj:
+                            await message.edit_text(f"Gem not found: {gem_identifier}")
+                            return
+                        db.set(GWEB_SETTINGS, f"user_gem.{user_id}", gem_obj.id)
+                        await message.edit_text(f"User {user_id} gem set to: {gem_obj.name} ({gem_obj.id})")
+                    except Exception as e:
+                        await message.edit_text(f"Failed to set user's gem: {e}")
+                    return
+
+            gem_identifier = " ".join(tokens[2:])
             try:
                 gem_client = await _get_gem_client()
                 await gem_client.fetch_gems(include_hidden=True)
@@ -582,13 +589,13 @@ async def _setgw(client: Client, message: Message):
                 await message.edit_text(f"Failed to set default gem: {e}")
             return
 
-        await message.edit_text("Usage:\n- setgw -> list gems\n- setgw role <GemNameOrId> -> set default gem\n- setgw role -> show current default")
+        await message.edit_text("Usage:\n- setgw -> list gems\n- setgw role <GemNameOrId> -> set global default\n- setgw role -> show current default\n- setgw role user <user_id> [GemNameOrId|clear] -> manage per-user gem")
     except Exception as e:
         await _safe_send_to_me(client, f"setgw error:\n\n{e}")
 
 
 modules_help["gweb"] = {
     "gweb on/off/del/all/r [user_id]": "Manage gweb auto-replies for users.",
-    "setgw / setgweb": "List gems and set global default gem. Usage: setgw, setgw role <GemNameOrId>, setgw role",
-    "Auto-reply to private messages": "Uses gemini_webapi (cookie-based) to reply and saves per-user chat metadata. Supports buffered messages, sticker/GIF buffering, typing actions and sending images returned by Gemini.",
+    "setgw / setgweb": "List custom gems and set global default gem or per-user gem. Usage: setgw, setgw role <GemNameOrId>, setgw role user <user_id> <GemNameOrId>, setgw role user <user_id> clear",
+    "Auto-reply to private messages": "Uses gemini_webapi (cookie-based) to reply and saves per-user Gemini chat metadata (no local transcript). Supports buffered messages, sticker/GIF buffering, typing actions and sending images returned by Gemini.",
 }
