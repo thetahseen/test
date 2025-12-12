@@ -3,7 +3,7 @@ import os
 import random
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Dict
 
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message
@@ -76,7 +76,6 @@ smileys = ["-.-", "):", ":)", "*.*", ")*", ";)"]
 sticker_gif_buffer = defaultdict(list)
 sticker_gif_timer = {}
 
-
 async def process_sticker_gif_buffer(client: Client, user_id):
     try:
         await asyncio.sleep(8)
@@ -88,9 +87,9 @@ async def process_sticker_gif_buffer(client: Client, user_id):
         random_smiley = random.choice(smileys)
         await asyncio.sleep(random.uniform(2, 6))
         await send_reply(last_msg.reply_text, [random_smiley], {}, client)
-    except Exception as e:
+    except Exception:
         try:
-            await client.send_message("me", f"Sticker/GIF buffer error:\n{e}")
+            await client.send_message("me", "Sticker/GIF buffer error")
         except Exception:
             pass
 
@@ -139,9 +138,7 @@ async def _download_reply_media(replied: Message) -> List[Path]:
     return files
 
 
-@Client.on_message(
-    (filters.sticker | filters.animation) & filters.private & ~filters.me & ~filters.bot, group=1
-)
+@Client.on_message((filters.sticker | filters.animation) & filters.private & ~filters.me & ~filters.bot, group=1)
 async def handle_sticker_gif_buffered(client: Client, message: Message):
     user = message.from_user
     if not user:
@@ -225,11 +222,7 @@ async def gweb_message_handler(client: Client, message: Message):
             metadata = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", None)
             chat = gem_client.start_chat(metadata=metadata, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=metadata)
 
-            if files and not combined_message:
-                send_prompt = message.reply_to_message.caption.strip() if message.reply_to_message and message.reply_to_message.caption else ""
-            else:
-                send_prompt = combined_message or ""
-
+            send_prompt = combined_message or "."
             try:
                 response = await chat.send_message(send_prompt, files=files if files else None)
             except Exception as e:
@@ -299,6 +292,106 @@ async def gweb_file_handler(client: Client, message: Message):
         chat_history.append(f"{user_name}: {caption}")
         db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{user_id}", chat_history)
 
+        if message.media_group_id:
+            if not hasattr(client, "media_buffer"):
+                client.media_buffer = defaultdict(list)  # media_group_id -> list of dicts {path, caption}
+                client.media_timers = {}
+
+            filename = getattr(message.document or message.video or message.audio or message.photo, "file_name", None)
+            ext_map = {
+                "voice": ".ogg",
+                "video_note": ".mp4",
+                "video": ".mp4",
+                "audio": ".mp3",
+                "document": ".bin",
+            }
+            if message.photo:
+                path = await client.download_media(message.photo)
+            else:
+                path = await client.download_media(message.document or message.video or message.audio or message.voice or message.video_note)
+            client.media_buffer[message.media_group_id].append({"path": path, "caption": caption})
+
+            if client.media_timers.get(message.media_group_id):
+                client.media_timers[message.media_group_id].cancel()
+
+            async def process_media_group(media_group_id: str, owner_id: int):
+                await asyncio.sleep(3)
+                entries = client.media_buffer.pop(media_group_id, [])
+                client.media_timers.pop(media_group_id, None)
+                if not entries:
+                    return
+                files = [Path(e["path"]) for e in entries if e.get("path")]
+                caption_text = ""
+                for e in entries:
+                    if e.get("caption"):
+                        caption_text = e.get("caption")
+                        break
+                send_prompt = caption_text or "."
+                try:
+                    gem_client = await get_client()
+                except Exception as e:
+                    await send_reply(client.send_message, [message.chat.id, f"❌ Gemini client error: {e}"], {}, client)
+                    # cleanup files
+                    for p in files:
+                        try:
+                            if p.exists():
+                                os.remove(p)
+                        except Exception:
+                            pass
+                    return
+
+                user_gem_id = db.get(GWEB_SETTINGS, f"user_gem.{owner_id}", None)
+                default_gem_id = db.get(GWEB_SETTINGS, "default_gem", None)
+                gem_to_use = user_gem_id or default_gem_id
+                metadata = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{owner_id}", None)
+                chat = gem_client.start_chat(metadata=metadata, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=metadata)
+
+                try:
+                    response = await chat.send_message(send_prompt, files=files if files else None)
+                except Exception as e:
+                    await send_reply(client.send_message, [message.chat.id, f"❌ Gemini error: {e}"], {}, client)
+                    for p in files:
+                        try:
+                            if p.exists():
+                                os.remove(p)
+                        except Exception:
+                            pass
+                    return
+
+                try:
+                    db.set(GWEB_HISTORY_COLLECTION, f"chat_metadata.{owner_id}", chat.metadata)
+                except Exception:
+                    pass
+
+                bot_response = response.text or "❌ No answer found."
+                full_history = db.get(GWEB_HISTORY_COLLECTION, f"chat_history.{owner_id}") or []
+                full_history.append(f"Bot: {bot_response}")
+                db.set(GWEB_HISTORY_COLLECTION, f"chat_history.{owner_id}", full_history)
+
+                if getattr(response, "images", None):
+                    for i, image in enumerate(response.images):
+                        try:
+                            if isinstance(image, GeneratedImage):
+                                file_path_img = os.path.join(TEMP_IMAGE_DIR, f"gweb_gen_{owner_id}_{i}.png")
+                                await image.save(path=TEMP_IMAGE_DIR, filename=f"gweb_gen_{owner_id}_{i}.png", verbose=True)
+                                await send_reply(client.send_photo, [message.chat.id, file_path_img], {"reply_to_message_id": message.id, "cleanup_file": file_path_img}, client)
+                            elif isinstance(image, WebImage):
+                                await send_reply(client.send_photo, [message.chat.id, image.url], {"reply_to_message_id": message.id}, client)
+                        except Exception:
+                            pass
+
+                await send_reply(message.reply_text, [bot_response], {"reply_to_message_id": message.id}, client)
+
+                for p in files:
+                    try:
+                        if p.exists():
+                            os.remove(p)
+                    except Exception:
+                        pass
+
+            client.media_timers[message.media_group_id] = asyncio.create_task(process_media_group(message.media_group_id, user_id))
+            return
+
         if message.video or message.video_note:
             file_path = await client.download_media(message.video or message.video_note)
             file_type = "video"
@@ -330,7 +423,7 @@ async def gweb_file_handler(client: Client, message: Message):
         metadata = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", None)
         chat = gem_client.start_chat(metadata=metadata, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=metadata)
 
-        prompt_text = caption or ""
+        prompt_text = caption or "."
         try:
             response = await chat.send_message(prompt_text, files=[Path(file_path)] if file_path else None)
         except Exception as e:
@@ -417,10 +510,7 @@ async def gweb_command(client: Client, message: Message):
                 disabled_users.remove(user_id)
                 db.set(GWEB_SETTINGS, "disabled_users", disabled_users)
                 changed = True
-            await send_reply(
-                message.edit_text,
-                [f"<spoiler>Removed: {user_id}</spoiler>" if changed else f"<spoiler>Not found: {user_id}</spoiler>"],
-                {}, client)
+            await send_reply(message.edit_text, [f"<spoiler>Removed: {user_id}</spoiler>" if changed else f"<spoiler>Not found: {user_id}</spoiler>"], {}, client)
         else:
             await send_reply(message.edit_text, ["Usage: gweb [on|off|del|all|r] [user_id]"], {}, client)
 
