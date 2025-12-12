@@ -424,13 +424,56 @@ async def _file_handler(client: Client, message: Message):
 @Client.on_message(filters.command(["gwrole"], prefix) & filters.me)
 async def _gwrole(client: Client, message: Message):
     try:
-        parts = message.text.strip().split(maxsplit=1)
-        target_id = message.chat.id
+        parts = message.text.strip().split(maxsplit=2)
         if len(parts) == 1:
-            db.remove(GWEB_SETTINGS, f"user_gem.{target_id}")
-            await _queue_reply(message.edit_text, [f"Cleared gem for this chat. Now using global default."], {}, client)
+            target = message.chat.id
+            user_gem = db.get(GWEB_SETTINGS, f"user_gem.{target}") or "None"
+            try:
+                gem_client = await _get_gem_client()
+                await gem_client.fetch_gems(include_hidden=True)
+                gem_obj = gem_client.gems.get(id=user_gem) if user_gem != "None" else None
+                name = gem_obj.name if gem_obj else user_gem
+                await _queue_reply(message.edit_text, [f"Chat {target} gem: {name}"], {}, client)
+            except Exception:
+                await _queue_reply(message.edit_text, [f"Chat {target} gem id: {user_gem}"], {}, client)
+            await _queue_reply(message.delete, [], {}, client)
             return
-        gem_identifier = parts[1].strip()
+        sub = parts[1].lower()
+        if sub in ("show",):
+            target = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else message.chat.id
+            user_gem = db.get(GWEB_SETTINGS, f"user_gem.{target}") or "None"
+            try:
+                gem_client = await _get_gem_client()
+                await gem_client.fetch_gems(include_hidden=True)
+                gem_obj = gem_client.gems.get(id=user_gem) if user_gem != "None" else None
+                name = gem_obj.name if gem_obj else user_gem
+                await _queue_reply(message.edit_text, [f"Chat {target} gem: {name}"], {}, client)
+            except Exception:
+                await _queue_reply(message.edit_text, [f"Chat {target} gem id: {user_gem}"], {}, client)
+            await _queue_reply(message.delete, [], {}, client)
+            return
+        if sub in ("clear", "del", "delete", "reset"):
+            target = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else message.chat.id
+            db.remove(GWEB_SETTINGS, f"user_gem.{target}")
+            await _queue_reply(message.edit_text, [f"Cleared gem for {target}. Now using global default."], {}, client)
+            await _queue_reply(message.delete, [], {}, client)
+            return
+        if sub in ("set",):
+            if len(parts) < 3:
+                await _queue_reply(message.edit_text, ["Usage: gwrole set <GemNameOrId> [chat_id]"], {}, client)
+                await _queue_reply(message.delete, [], {}, client)
+                return
+            rest = parts[2].strip()
+            tokens = rest.split()
+            if tokens and tokens[-1].isdigit():
+                target = int(tokens[-1])
+                gem_identifier = " ".join(tokens[:-1]).strip()
+            else:
+                target = message.chat.id
+                gem_identifier = rest
+        else:
+            target = message.chat.id
+            gem_identifier = " ".join(parts[1:]).strip()
         try:
             gem_client = await _get_gem_client()
             await gem_client.fetch_gems(include_hidden=True)
@@ -449,9 +492,11 @@ async def _gwrole(client: Client, message: Message):
                     break
         if not gem_obj:
             await _queue_reply(message.edit_text, [f"Gem not found: {gem_identifier}"], {}, client)
+            await _queue_reply(message.delete, [], {}, client)
             return
-        db.set(GWEB_SETTINGS, f"user_gem.{target_id}", gem_obj.id)
-        await _queue_reply(message.edit_text, [f"Gem for this chat set to: {gem_obj.name} ({gem_obj.id})"], {}, client)
+        db.set(GWEB_SETTINGS, f"user_gem.{target}", gem_obj.id)
+        await _queue_reply(message.edit_text, [f"Gem for {target} set to: {gem_obj.name} ({gem_obj.id})"], {}, client)
+        await _queue_reply(message.delete, [], {}, client)
     except Exception as e:
         await _safe_send_to_me(client, f"gwrole error:\n\n{e}")
 
