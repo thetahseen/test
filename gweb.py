@@ -225,7 +225,10 @@ async def gweb_message_handler(client: Client, message: Message):
             metadata = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", None)
             chat = gem_client.start_chat(metadata=metadata, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=metadata)
 
-            send_prompt = combined_message or "Please describe the attached media."
+            if files and not combined_message:
+                send_prompt = message.reply_to_message.caption.strip() if message.reply_to_message and message.reply_to_message.caption else ""
+            else:
+                send_prompt = combined_message or ""
 
             try:
                 response = await chat.send_message(send_prompt, files=files if files else None)
@@ -327,7 +330,7 @@ async def gweb_file_handler(client: Client, message: Message):
         metadata = db.get(GWEB_HISTORY_COLLECTION, f"chat_metadata.{user_id}", None)
         chat = gem_client.start_chat(metadata=metadata, gem=gem_to_use) if gem_to_use else gem_client.start_chat(metadata=metadata)
 
-        prompt_text = f"User sent a {file_type}." + (f" Caption: {caption}" if caption else "")
+        prompt_text = caption or ""
         try:
             response = await chat.send_message(prompt_text, files=[Path(file_path)] if file_path else None)
         except Exception as e:
