@@ -424,34 +424,57 @@ async def _file_handler(client: Client, message: Message):
 @Client.on_message(filters.command(["gwrole"], prefix) & filters.me)
 async def _gwrole(client: Client, message: Message):
     try:
-        parts = message.text.strip().split(maxsplit=1)
-        target_id = message.chat.id
+        # Parse like other admin commands: gwrole <GemNameOrId> [target_chat_id]
+        parts = message.text.strip().split()
         if len(parts) == 1:
+            # clear for current chat
+            target_id = message.chat.id
             db.remove(GWEB_SETTINGS, f"user_gem.{target_id}")
             await _queue_reply(message.edit_text, [f"Cleared gem for this chat. Now using global default."], {}, client)
+            await _queue_reply(message.delete, [], {}, client)
             return
-        gem_identifier = parts[1].strip()
+
+        # If last arg is a numeric id, treat it as target chat id
+        target = message.chat.id
+        gem_identifier = " ".join(parts[1:])
+        if len(parts) > 2 and parts[-1].isdigit():
+            target = int(parts[-1])
+            gem_identifier = " ".join(parts[1:-1])
+
+        gem_identifier = gem_identifier.strip()
+        if not gem_identifier:
+            db.remove(GWEB_SETTINGS, f"user_gem.{target}")
+            await _queue_reply(message.edit_text, [f"Cleared gem for {target}. Now using global default."], {}, client)
+            await _queue_reply(message.delete, [], {}, client)
+            return
+
         try:
             gem_client = await _get_gem_client()
             await gem_client.fetch_gems(include_hidden=True)
         except Exception as e:
             await _safe_send_to_me(client, f"❌ failed to get gem client: {e}")
             return
+
         gem_obj = None
         try:
             gem_obj = gem_client.gems.get(id=gem_identifier)
         except Exception:
             gem_obj = None
+
         if not gem_obj:
             for g in gem_client.gems:
                 if g.name and g.name.strip().lower() == gem_identifier.strip().lower():
                     gem_obj = g
                     break
+
         if not gem_obj:
             await _queue_reply(message.edit_text, [f"Gem not found: {gem_identifier}"], {}, client)
+            await _queue_reply(message.delete, [], {}, client)
             return
-        db.set(GWEB_SETTINGS, f"user_gem.{target_id}", gem_obj.id)
-        await _queue_reply(message.edit_text, [f"Gem for this chat set to: {gem_obj.name} ({gem_obj.id})"], {}, client)
+
+        db.set(GWEB_SETTINGS, f"user_gem.{target}", gem_obj.id)
+        await _queue_reply(message.edit_text, [f"Gem for {target} set to: {gem_obj.name} ({gem_obj.id})"], {}, client)
+        await _queue_reply(message.delete, [], {}, client)
     except Exception as e:
         await _safe_send_to_me(client, f"gwrole error:\n\n{e}")
 
